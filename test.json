@@ -1,0 +1,14 @@
+{
+  "request": {
+    "path": "temp/test-clip.mp4",
+    "regions": [
+      "gb"
+    ],
+    "pixelate": true,
+    "includeTracking": false
+  },
+  "summary": [],
+  "tracking": [],
+  "duration": 3.045,
+  "output": "/Users/lewiswestbury/pixelated-test.mp4"
+}

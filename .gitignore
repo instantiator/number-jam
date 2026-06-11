@@ -1,0 +1,42 @@
+# Compiled output
+dist/
+
+# Dependencies
+node_modules/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Test coverage output
+coverage/
+
+# macOS metadata
+.DS_Store
+_DS_Store
+
+# Editor/IDE directories
+.vscode/
+.idea/
+
+# Environment files (never commit secrets)
+.env
+.env.local
+.env.*.local
+
+# OS temporary files
+Thumbs.db
+
+# Temporary files created by number-jam at runtime
+temp/
+
+# Python bytecode / virtualenvs
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# npm debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
