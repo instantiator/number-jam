@@ -1,6 +1,6 @@
 /**
  * Obscures number plate polygons by filling them with the plate's estimated
- * background colour.
+ * background colour and soft-feathered edges.
  *
  * Strategy per plate:
  *  1. Compute the axis-aligned bounding box from the polygon vertices.
@@ -9,13 +9,13 @@
  *  4. Estimate the background colour: pixels brighter than the mean luma are
  *     background candidates (plate surface); darker pixels are text strokes.
  *     Average those bright pixels to get the fill colour.
- *  5. Generate a full-frame SVG with the polygon filled in that colour.
- *  6. Composite the SVG overlay onto the frame using the "over" blend mode.
- *
- * Using a polygon fill (rather than an axis-aligned rectangle) respects the
- * plate's actual orientation and shape. Sampling the background colour (rather
- * than a fixed colour) makes the patch indistinguishable from the plate surface
- * at a glance while still hiding the text.
+ *  5. Render a greyscale alpha mask (white polygon on black) and apply a
+ *     Gaussian blur to feather the polygon edges.
+ *  6. Attach the blurred mask as the alpha channel of a solid-colour image.
+ *     Doing this separately (rather than blurring the RGBA overlay directly)
+ *     prevents the colour-bleed artefact where sharp blurs the transparent
+ *     black exterior into the fill colour at the edge.
+ *  7. Composite the feathered overlay onto the frame.
  *
  * The result is written to outputPath.
  */
@@ -87,13 +87,19 @@ export function clampedBbox(
   return { left, top, width: right - left, height: bottom - top };
 }
 
+// Gaussian sigma for polygon edge feathering; roughly 2× this value in pixels
+// of soft transition on each side of the polygon boundary.
+const EDGE_BLUR_SIGMA = 3;
+
 /**
  * Build a sharp OverlayOptions that fills the plate polygon with the
- * estimated background colour of the plate region.
+ * estimated background colour and soft-feathered edges.
  *
  * Reads raw pixels from the bounding box, computes the mean luma, then
  * averages only the pixels brighter than that mean. On a standard plate
  * (dark text on a light surface) those bright pixels are the background.
+ * The alpha mask is blurred separately so the fill colour stays constant
+ * at the edges rather than bleeding towards black.
  * Returns null when the polygon's bounding box is degenerate (< 4 px).
  */
 async function buildPolygonOverlay(
@@ -136,10 +142,29 @@ async function buildPolygonOverlay(
   const r = bgCount > 0 ? Math.round(rSum / bgCount) : 220;
   const g = bgCount > 0 ? Math.round(gSum / bgCount) : 220;
   const b = bgCount > 0 ? Math.round(bSum / bgCount) : 220;
-  const fill = `rgb(${r},${g},${b})`;
 
   const pts = polygon.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(" ");
-  const svg = `<svg width="${frameW}" height="${frameH}" xmlns="http://www.w3.org/2000/svg"><polygon points="${pts}" fill="${fill}"/></svg>`;
 
-  return { input: Buffer.from(svg), top: 0, left: 0 };
+  // Greyscale alpha mask: white polygon on opaque black background so that
+  // sharp renders a 3-channel (no-alpha) image. After greyscale conversion
+  // and blur, the result is a single-channel buffer where 255 = fully opaque
+  // and the edges fade to 0. This is joined as the alpha channel of a
+  // solid-colour image rather than blurring the RGBA overlay directly,
+  // which would cause the fill colour to bleed towards black at the edges.
+  const maskSvg = `<svg width="${frameW}" height="${frameH}" xmlns="http://www.w3.org/2000/svg"><rect width="${frameW}" height="${frameH}" fill="black"/><polygon points="${pts}" fill="white"/></svg>`;
+  const blurredMask = await sharp(Buffer.from(maskSvg))
+    .flatten({ background: { r: 0, g: 0, b: 0 } })
+    .greyscale()
+    .blur(EDGE_BLUR_SIGMA)
+    .raw()
+    .toBuffer();
+
+  const overlay = await sharp({
+    create: { width: frameW, height: frameH, channels: 3, background: { r, g, b } },
+  })
+    .joinChannel(blurredMask, { raw: { width: frameW, height: frameH, channels: 1 } })
+    .png()
+    .toBuffer();
+
+  return { input: overlay, top: 0, left: 0 };
 }
