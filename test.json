@@ -4,11 +4,23 @@
     "regions": [
       "gb"
     ],
-    "pixelate": true,
+    "obscure": true,
     "includeTracking": false
   },
-  "summary": [],
+  "summary": [
+    {
+      "plate": "HF6CZB",
+      "region": "gb"
+    },
+    {
+      "plate": "HF16CZB",
+      "region": "gb"
+    }
+  ],
   "tracking": [],
-  "duration": 3.045,
+  "videoDuration": 3.045,
+  "processingDuration": 57336,
+  "firstPlateAt": 433,
+  "lastPlateAt": 2733,
   "output": "/Users/lewiswestbury/pixelated-test.mp4"
 }

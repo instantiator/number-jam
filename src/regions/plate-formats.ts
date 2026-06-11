@@ -20,7 +20,7 @@ export interface PlateFormat {
 
 /** All known plate formats, ordered by region then country code. */
 export const PLATE_FORMATS: PlateFormat[] = [
-  // ── Europe ────────────────────────────────────────────────────────────────
+  // Europe
 
   {
     code: "gb",
@@ -178,7 +178,7 @@ export const PLATE_FORMATS: PlateFormat[] = [
     nonExamples: ["3AB123", "ABC1234", "3456ABC12"],
   },
 
-  // ── Americas ──────────────────────────────────────────────────────────────
+  // Americas
 
   {
     code: "us",
@@ -231,7 +231,7 @@ export const PLATE_FORMATS: PlateFormat[] = [
     nonExamples: ["AB123", "ABC1234"],
   },
 
-  // ── Asia-Pacific ──────────────────────────────────────────────────────────
+  // Asia-Pacific
 
   {
     code: "au",
@@ -319,7 +319,7 @@ export const PLATE_FORMATS: PlateFormat[] = [
     nonExamples: ["AB1234", "ABCD1234"],
   },
 
-  // ── Middle East & Africa ──────────────────────────────────────────────────
+  // Middle East & Africa
 
   {
     code: "ae",

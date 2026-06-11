@@ -25,7 +25,7 @@ export async function detectAllFrames(
 
   for (let i = 0; i < frames.length; i++) {
     const frame = frames[i];
-    process.stderr.write(`Scanning frame ${i + 1}/${total} …\r`);
+    process.stderr.write(`Scanning frame ${i + 1}/${total}...\r`);
 
     const detections = await engine.detectPlates(frame.filePath, frame.frameIndex, regions);
 

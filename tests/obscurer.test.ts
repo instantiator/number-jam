@@ -1,8 +1,8 @@
 /**
- * Unit tests for the plate pixelation module.
+ * Unit tests for the plate obscuring module.
  *
  * The pure geometry helpers {@link plateAngleDeg} and {@link clampedBbox} are
- * tested with synthetic polygon data.  {@link pixelateFrame} is tested
+ * tested with synthetic polygon data. {@link obscureFrame} is tested
  * end-to-end using a small synthetic JPEG created in memory by sharp, so that
  * no real video fixture is required.
  */
@@ -13,13 +13,13 @@ import * as os from "os";
 import * as path from "path";
 import sharp from "sharp";
 import {
-  pixelateFrame,
+  obscureFrame,
   plateAngleDeg,
   clampedBbox,
-} from "../src/pixelation/pixelator";
+} from "../src/obscuring/obscurer";
 import { PlateDetection } from "../src/types";
 
-// ── Geometry helpers ─────────────────────────────────────────────────────────
+// Geometry helpers
 
 describe("plateAngleDeg", () => {
   it("returns ~0 for a perfectly horizontal plate", () => {
@@ -105,16 +105,16 @@ describe("clampedBbox", () => {
   });
 });
 
-// ── pixelateFrame end-to-end ──────────────────────────────────────────────────
+// obscureFrame end-to-end
 
-describe("pixelateFrame", () => {
+describe("obscureFrame", () => {
   let tmpDir: string;
   let srcPath: string;
   let outPath: string;
 
-  /** Create a 200×100 grey JPEG in a temp directory before all tests. */
+  /** Create a 200x100 grey JPEG in a temp directory before all tests. */
   beforeAll(async () => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "nj-pix-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "nj-obscure-test-"));
     srcPath = path.join(tmpDir, "src.jpg");
     outPath = path.join(tmpDir, "out.jpg");
 
@@ -132,7 +132,7 @@ describe("pixelateFrame", () => {
   });
 
   it("writes the output file when there are no detections", async () => {
-    await pixelateFrame(srcPath, [], outPath);
+    await obscureFrame(srcPath, [], outPath);
     expect(fs.existsSync(outPath)).toBe(true);
   });
 
@@ -150,7 +150,7 @@ describe("pixelateFrame", () => {
       ],
       frameIndex: 0,
     };
-    await pixelateFrame(srcPath, [det], outPath);
+    await obscureFrame(srcPath, [det], outPath);
     expect(fs.existsSync(outPath)).toBe(true);
     // The output should be a readable JPEG.
     const meta = await sharp(outPath).metadata();
@@ -163,10 +163,10 @@ describe("pixelateFrame", () => {
       confidence: 50,
       region: null,
       regionConfidence: 0,
-      polygon: [[10, 10]], // degenerate — skipped by pixelateFrame
+      polygon: [[10, 10]], // degenerate -- skipped by obscureFrame
       frameIndex: 0,
     };
-    await expect(pixelateFrame(srcPath, [det], outPath)).resolves.not.toThrow();
+    await expect(obscureFrame(srcPath, [det], outPath)).resolves.not.toThrow();
     expect(fs.existsSync(outPath)).toBe(true);
   });
 
@@ -185,6 +185,6 @@ describe("pixelateFrame", () => {
       frameIndex: 0,
     };
     // The bounding box will be clamped to zero size and the overlay skipped.
-    await expect(pixelateFrame(srcPath, [det], outPath)).resolves.not.toThrow();
+    await expect(obscureFrame(srcPath, [det], outPath)).resolves.not.toThrow();
   });
 });

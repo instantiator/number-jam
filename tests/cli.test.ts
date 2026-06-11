@@ -1,18 +1,15 @@
 /**
  * Unit tests for the CLI helper functions.
  *
- * The three exported helpers ({@link parseRegions}, {@link warnUnknownRegions},
- * {@link createEngine}) contain all the testable logic from the CLI entry point.
- * The main pipeline wiring and file-system orchestration are left to end-to-end
- * or integration tests.
+ * The two exported helpers ({@link parseRegions}, {@link warnUnknownRegions})
+ * contain all the testable logic from the CLI entry point. The main pipeline
+ * wiring and file-system orchestration are left to end-to-end or integration tests.
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { parseRegions, warnUnknownRegions, createEngine } from "../src/cli";
-import { DockerAlprEngine } from "../src/detection/engines/docker-alpr";
-import { FastAlprEngine } from "../src/detection/engines/fast-alpr";
+import { parseRegions, warnUnknownRegions } from "../src/cli";
 
-// ── parseRegions ─────────────────────────────────────────────────────────────
+// parseRegions
 
 describe("parseRegions", () => {
   it("returns [\"*\"] for the literal wildcard string", () => {
@@ -44,27 +41,7 @@ describe("parseRegions", () => {
   });
 });
 
-// ── createEngine ─────────────────────────────────────────────────────────────
-
-describe("createEngine", () => {
-  it("returns a DockerAlprEngine for \"docker-alpr\"", () => {
-    expect(createEngine("docker-alpr")).toBeInstanceOf(DockerAlprEngine);
-  });
-
-  it("returns a FastAlprEngine for \"fast-alpr\"", () => {
-    expect(createEngine("fast-alpr")).toBeInstanceOf(FastAlprEngine);
-  });
-
-  it("throws for an unknown engine identifier", () => {
-    expect(() => createEngine("unknown-engine")).toThrow(/docker-alpr/);
-  });
-
-  it("error message for unknown engine mentions valid options", () => {
-    expect(() => createEngine("bad")).toThrow(/fast-alpr/);
-  });
-});
-
-// ── warnUnknownRegions ────────────────────────────────────────────────────────
+// warnUnknownRegions
 
 describe("warnUnknownRegions", () => {
   afterEach(() => {

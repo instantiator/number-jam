@@ -16,7 +16,7 @@ ffmpeg.setFfprobePath(ffprobeStatic.path);
 /**
  * Compose an output video from a directory of sequential frame JPEGs.
  *
- * @param framesDir   Directory containing frame_000001.jpg … frame_NNNNNN.jpg.
+ * @param framesDir   Directory containing frame_000001.jpg ... frame_NNNNNN.jpg.
  * @param fps         Frame rate to encode at (must match the source video).
  * @param originalInput  Path to the original video (used to copy its audio stream).
  * @param outputPath  Destination path for the encoded output video.

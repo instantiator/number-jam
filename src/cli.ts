@@ -3,7 +3,7 @@
  * number-jam CLI entry point.
  *
  * Accepts a video file, detects and tracks number plates via the selected ANPR
- * engine, optionally pixelates them in the output video, and prints a JSON
+ * engine, optionally obscures them in the output video, and prints a JSON
  * result document to stdout.
  *
  * Progress messages are written to stderr to keep stdout clean for piping.
@@ -15,44 +15,33 @@ import * as path from "path";
 import sharp from "sharp";
 import { Command } from "commander";
 import { DockerAlprEngine } from "./detection/engines/docker-alpr";
-import { FastAlprEngine } from "./detection/engines/fast-alpr";
-import { DetectionEngine } from "./detection/engine";
 import { extractFrames, getVideoInfo } from "./video/extractor";
 import { detectAllFrames } from "./detection/detector";
 import { buildTracks } from "./tracking/tracker";
-import { pixelateFrame } from "./pixelation/pixelator";
+import { obscureFrame } from "./obscuring/obscurer";
 import { composeVideo } from "./video/composer";
 import { buildOutputDoc } from "./output/formatter";
 import { PLATE_FORMATS } from "./regions/plate-formats";
 import { PlateDetection, Point } from "./types";
 
-/** Supported engine identifiers. */
-type EngineId = "docker-alpr" | "fast-alpr";
-
 const program = new Command();
 
 program
   .name("number-jam")
-  .description("Detect, track, and optionally pixelate number plates in a video file.")
+  .description("Detect, track, and optionally obscure number plates in a video file.")
   .requiredOption("-i, --input <path>", "Path to the input video file")
-  .option("-o, --output <path>", "Path to the output video file (required with --pixelate-number-plates)")
-  .option("-p, --pixelate-number-plates", "Pixelate detected number plates in the output video")
+  .option("-o, --output <path>", "Path to the output video file (required with --obscure-number-plates)")
+  .option("-p, --obscure-number-plates", "Obscure detected number plates in the output video")
   .option(
     "-r, --regions <codes>",
     "Comma-separated list of region codes to look for (e.g. gb,de,fr). Omit for all regions.",
     "*"
   )
-  .option(
-    "--engine <id>",
-    "ANPR engine to use: docker-alpr (default) or fast-alpr",
-    "docker-alpr"
-  )
   .option("--include-tracking", "Include full frame-by-frame tracking history in JSON output")
-  .option("--preprocess", "Sharpen, normalise, and upscale low-res frames before detection")
   .option(
     "--min-confidence <number>",
-    "Drop detections whose OCR confidence is below this value (0–100). " +
-      "Applies to the summary; the pixelation pass always uses all detections.",
+    "Drop detections whose OCR confidence is below this value (0-100). " +
+      "Applies to the summary; the obscuring pass always uses all detections.",
     parseFloat
   )
   .option(
@@ -67,11 +56,9 @@ if (require.main === module) {
   const opts = program.opts<{
     input: string;
     output?: string;
-    pixelateNumberPlates?: boolean;
+    obscureNumberPlates?: boolean;
     regions: string;
-    engine: string;
     includeTracking?: boolean;
-    preprocess?: boolean;
     minConfidence?: number;
     extendSeconds?: number;
   }>();
@@ -85,22 +72,22 @@ if (require.main === module) {
 async function main(opts: {
   input: string;
   output?: string;
-  pixelateNumberPlates?: boolean;
+  obscureNumberPlates?: boolean;
   regions: string;
-  engine: string;
   includeTracking?: boolean;
-  preprocess?: boolean;
   minConfidence?: number;
   extendSeconds?: number;
 }): Promise<void> {
-  // ── Validate inputs ────────────────────────────────────────────────────────
+  const startTime = Date.now();
+
+  // Validate inputs
 
   if (!fs.existsSync(opts.input)) {
     throw new Error(`Input file not found: ${opts.input}`);
   }
 
-  if (opts.pixelateNumberPlates && !opts.output) {
-    throw new Error("--output is required when --pixelate-number-plates is set");
+  if (opts.obscureNumberPlates && !opts.output) {
+    throw new Error("--output is required when --obscure-number-plates is set");
   }
 
   if (opts.output) {
@@ -113,9 +100,9 @@ async function main(opts: {
   const regions = parseRegions(opts.regions);
   warnUnknownRegions(regions);
 
-  // ── Instantiate and verify the ANPR engine ─────────────────────────────────
+  // Instantiate and verify the ANPR engine
 
-  const engine = createEngine(opts.engine, opts.minConfidence ?? 0);
+  const engine = new DockerAlprEngine(opts.minConfidence ?? 0);
   await engine.check();
   await engine.startup();
 
@@ -126,24 +113,24 @@ async function main(opts: {
     const framesDir = path.join(tmpDir, "frames");
     fs.mkdirSync(framesDir);
 
-    // ── Phase 1: extract frames ────────────────────────────────────────────
+    // Phase 1: extract frames
 
     const videoInfo = await getVideoInfo(inputPath);
     process.stderr.write(
       `Video: ${videoInfo.frameCount} frames @ ${videoInfo.fps.toFixed(2)} fps ` +
         `(${videoInfo.durationSeconds.toFixed(1)}s)\n`
     );
-    process.stderr.write("Extracting frames …\n");
+    process.stderr.write("Extracting frames...\n");
 
     const frames = await extractFrames(inputPath, framesDir, (written, total) => {
       process.stderr.write(`  Extracted ${written}/${total} frames\r`);
     });
     process.stderr.write(`\nExtracted ${frames.length} frame(s)\n`);
 
-    // ── Phase 1b: pre-process frames (optional) ────────────────────────────
+    // Phase 1b: pre-process frames
 
-    if (opts.preprocess && frames.length > 0) {
-      process.stderr.write("Pre-processing frames …\n");
+    if (frames.length > 0) {
+      process.stderr.write("Pre-processing frames...\n");
       const { width = 1920 } = await sharp(frames[0].filePath).metadata();
       const upscale = width < 1280;
       for (const frame of frames) {
@@ -156,27 +143,27 @@ async function main(opts: {
       process.stderr.write(`Pre-processed ${frames.length} frame(s)\n`);
     }
 
-    // ── Phase 2: detect plates ────────────────────────────────────────────
+    // Phase 2: detect plates
 
-    process.stderr.write("Scanning frames for number plates …\n");
+    process.stderr.write("Scanning frames for number plates...\n");
     const frameResults = await detectAllFrames(frames, regions, engine);
 
     const totalDetections = frameResults.reduce((s, r) => s + r.detections.length, 0);
     process.stderr.write(`Found ${totalDetections} detection(s) across all frames\n`);
 
-    // ── Phase 3: track plates ─────────────────────────────────────────────
+    // Phase 3: track plates
 
-    process.stderr.write("Building tracks …\n");
+    process.stderr.write("Building tracks...\n");
     const tracks = buildTracks(frameResults, videoInfo.fps);
     process.stderr.write(`Identified ${tracks.length} track(s)\n`);
 
-    // ── Phase 4: pixelate (optional) ──────────────────────────────────────
+    // Phase 4: obscure plates (optional)
 
-    if (opts.pixelateNumberPlates && opts.output) {
-      process.stderr.write("Applying pixelation …\n");
+    if (opts.obscureNumberPlates && opts.output) {
+      process.stderr.write("Obscuring plates...\n");
 
-      const pixDir = path.join(tmpDir, "pixelated");
-      fs.mkdirSync(pixDir);
+      const obscureDir = path.join(tmpDir, "obscured");
+      fs.mkdirSync(obscureDir);
 
       // Build per-frame polygon coverage from detected tracks.
       // Each track's history (including tracker-interpolated frames) is added
@@ -222,9 +209,9 @@ async function main(opts: {
         }
       }
 
-      process.stderr.write(`${trackPolygons.size} frame(s) scheduled for pixelation\n`);
+      process.stderr.write(`${trackPolygons.size} frame(s) scheduled for obscuring\n`);
 
-      let pixelated = 0;
+      let obscured = 0;
       for (const frame of frames) {
         const polygons = trackPolygons.get(frame.frameIndex) ?? [];
         const syntheticDetections: PlateDetection[] = polygons.map((polygon) => ({
@@ -235,17 +222,17 @@ async function main(opts: {
           polygon,
           frameIndex: frame.frameIndex,
         }));
-        const outFramePath = path.join(pixDir, path.basename(frame.filePath));
-        await pixelateFrame(frame.filePath, syntheticDetections, outFramePath);
-        if (syntheticDetections.some((d) => d.polygon.length >= 3)) pixelated++;
+        const outFramePath = path.join(obscureDir, path.basename(frame.filePath));
+        await obscureFrame(frame.filePath, syntheticDetections, outFramePath);
+        if (syntheticDetections.some((d) => d.polygon.length >= 3)) obscured++;
       }
 
       process.stderr.write(
-        `Pixelated ${pixelated} frame(s); composing output video …\n`
+        `Obscured ${obscured} frame(s); composing output video...\n`
       );
 
       await composeVideo(
-        pixDir,
+        obscureDir,
         videoInfo.fps,
         inputPath,
         path.resolve(opts.output),
@@ -255,20 +242,35 @@ async function main(opts: {
       process.stderr.write(`\nOutput video written to ${opts.output}\n`);
     }
 
-    // ── Phase 5: output JSON ──────────────────────────────────────────────
+    // Phase 5: output JSON
 
     const resolvedOutput =
-      opts.pixelateNumberPlates && opts.output ? path.resolve(opts.output) : null;
+      opts.obscureNumberPlates && opts.output ? path.resolve(opts.output) : null;
+
+    const firstPlateAt =
+      tracks.length > 0
+        ? Math.round(Math.min(...tracks.map((t) => t.history[0].timestamp)) * 1000)
+        : 0;
+    const lastPlateAt =
+      tracks.length > 0
+        ? Math.round(
+            Math.max(...tracks.map((t) => t.history[t.history.length - 1].timestamp)) * 1000
+          )
+        : 0;
+    const processingDuration = Date.now() - startTime;
 
     const doc = buildOutputDoc(
       {
         path: opts.input,
         regions,
-        pixelate: !!opts.pixelateNumberPlates,
+        obscure: !!opts.obscureNumberPlates,
         includeTracking: !!opts.includeTracking,
       },
       tracks,
       videoInfo.durationSeconds,
+      processingDuration,
+      firstPlateAt,
+      lastPlateAt,
       resolvedOutput,
     );
 
@@ -276,24 +278,6 @@ async function main(opts: {
   } finally {
     await engine.shutdown();
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-}
-
-/**
- * Instantiate the appropriate engine for the given identifier.
- * Exported for unit testing.
- */
-export function createEngine(id: string, minConfidence = 0): DetectionEngine {
-  const engineId = id as EngineId;
-  switch (engineId) {
-    case "docker-alpr":
-      return new DockerAlprEngine(minConfidence);
-    case "fast-alpr":
-      return new FastAlprEngine();
-    default:
-      throw new Error(
-        `Unknown engine "${id}". Valid options: docker-alpr, fast-alpr`
-      );
   }
 }
 

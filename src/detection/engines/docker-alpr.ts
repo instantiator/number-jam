@@ -142,7 +142,7 @@ export class DockerAlprEngine implements DetectionEngine {
     }
   }
 
-  // ── private helpers ──────────────────────────────────────────────────────
+  // private helpers
 
   private async checkDockerCli(): Promise<void> {
     const ok = await probe("docker", ["--version"]);
@@ -200,7 +200,7 @@ export class DockerAlprEngine implements DetectionEngine {
   }
 }
 
-// ── module-level helpers ───────────────────────────────────────────────────
+// module-level helpers
 
 /**
  * Spawn a command and return its stdout as a string.

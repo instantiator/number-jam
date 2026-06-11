@@ -4,19 +4,13 @@
 
 import { OutputDoc, PlateSummary, RequestInfo, Track } from "../types";
 
-/**
- * Build the JSON output document from the processed pipeline results.
- *
- * @param request   The original CLI request parameters.
- * @param tracks    All tracks produced by the tracker.
- * @param duration  Duration of the input video in seconds.
- * @param output    Resolved path to the output video file, or null when
- *                  pixelation was not performed.
- */
 export function buildOutputDoc(
   request: RequestInfo,
   tracks: Track[],
-  duration: number,
+  videoDuration: number,
+  processingDuration: number,
+  firstPlateAt: number,
+  lastPlateAt: number,
   output: string | null,
 ): OutputDoc {
   const summary = buildSummary(tracks);
@@ -30,7 +24,16 @@ export function buildOutputDoc(
       }))
     : [];
 
-  return { request, summary, tracking, duration, output };
+  return {
+    request,
+    summary,
+    tracking,
+    videoDuration,
+    processingDuration,
+    firstPlateAt,
+    lastPlateAt,
+    output,
+  };
 }
 
 /** Deduplicate tracks into a summary list of unique (plate, region) pairs. */

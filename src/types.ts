@@ -71,7 +71,7 @@ export interface Track {
 export interface RequestInfo {
   path: string;
   regions: string[];
-  pixelate: boolean;
+  obscure: boolean;
   /** When true, the full per-frame tracking history is included in the output. */
   includeTracking: boolean;
 }
@@ -96,7 +96,13 @@ export interface OutputDoc {
     history: Array<{ timestamp: number; polygon: Point[] }>;
   }>;
   /** Duration of the input video in seconds. */
-  duration: number;
-  /** Resolved path to the output video, or null when pixelation was not performed. */
+  videoDuration: number;
+  /** Total wall-clock processing time in milliseconds. */
+  processingDuration: number;
+  /** Timestamp (ms) of the earliest plate detection in the video. 0 when no plates were found. */
+  firstPlateAt: number;
+  /** Timestamp (ms) of the latest plate detection in the video. 0 when no plates were found. */
+  lastPlateAt: number;
+  /** Resolved path to the output video, or null when obscuring was not performed. */
   output: string | null;
 }
