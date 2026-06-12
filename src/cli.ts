@@ -12,17 +12,19 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import sharp from "sharp";
 import { Command } from "commander";
 import { DockerAlprEngine } from "./detection/engines/docker-alpr";
-import { extractFrames, getVideoInfo } from "./video/extractor";
-import { detectAllFrames } from "./detection/detector";
-import { buildTracks } from "./tracking/tracker";
-import { obscureFrame } from "./obscuring/obscurer";
-import { composeVideo } from "./video/composer";
 import { buildOutputDoc } from "./output/formatter";
 import { PLATE_FORMATS } from "./regions/plate-formats";
-import { PlateDetection, Point } from "./types";
+import {
+  runExtraction,
+  runPreProcessing,
+  runDetection,
+  runTrackBuilding,
+  runTrackCoverage,
+  runObscuring,
+  runComposition,
+} from "./cli/phases";
 
 const program = new Command();
 
@@ -46,7 +48,7 @@ program
   )
   .option(
     "--extend-seconds <number>",
-    "Extend plate obscuring this many seconds before and after each detected track (default: 2)",
+    "Velocity-extrapolate plate positions this many seconds beyond where visual tracking ends (default: 2)",
     parseFloat
   );
 
@@ -81,15 +83,12 @@ async function main(opts: {
   const startTime = Date.now();
 
   // Validate inputs
-
   if (!fs.existsSync(opts.input)) {
     throw new Error(`Input file not found: ${opts.input}`);
   }
-
   if (opts.obscureNumberPlates && !opts.output) {
     throw new Error("--output is required when --obscure-number-plates is set");
   }
-
   if (opts.output) {
     const outDir = path.dirname(path.resolve(opts.output));
     if (!fs.existsSync(outDir)) {
@@ -99,8 +98,6 @@ async function main(opts: {
 
   const regions = parseRegions(opts.regions);
   warnUnknownRegions(regions);
-
-  // Instantiate and verify the ANPR engine
 
   const engine = new DockerAlprEngine(opts.minConfidence ?? 0);
   await engine.check();
@@ -113,140 +110,29 @@ async function main(opts: {
     const framesDir = path.join(tmpDir, "frames");
     fs.mkdirSync(framesDir);
 
-    // Phase 1: extract frames
-
-    const videoInfo = await getVideoInfo(inputPath);
-    process.stderr.write(
-      `Video: ${videoInfo.frameCount} frames @ ${videoInfo.fps.toFixed(2)} fps ` +
-        `(${videoInfo.durationSeconds.toFixed(1)}s)\n`
-    );
-    process.stderr.write("Extracting frames...\n");
-
-    const frames = await extractFrames(inputPath, framesDir, (written, total) => {
-      process.stderr.write(`  Extracted ${written}/${total} frames\r`);
-    });
-    process.stderr.write(`\nExtracted ${frames.length} frame(s)\n`);
-
-    // Phase 1b: pre-process frames
-
-    if (frames.length > 0) {
-      process.stderr.write("Pre-processing frames...\n");
-      const { width = 1920 } = await sharp(frames[0].filePath).metadata();
-      const upscale = width < 1280;
-      for (const frame of frames) {
-        const tmp = frame.filePath + ".pre.jpg";
-        let pipeline = sharp(frame.filePath).sharpen().normalise();
-        if (upscale) pipeline = pipeline.resize(width * 2);
-        await pipeline.jpeg({ quality: 95 }).toFile(tmp);
-        fs.renameSync(tmp, frame.filePath);
-      }
-      process.stderr.write(`Pre-processed ${frames.length} frame(s)\n`);
-    }
-
-    // Phase 2: detect plates
-
-    process.stderr.write("Scanning frames for number plates...\n");
-    const frameResults = await detectAllFrames(frames, regions, engine);
-
-    const totalDetections = frameResults.reduce((s, r) => s + r.detections.length, 0);
-    process.stderr.write(`Found ${totalDetections} detection(s) across all frames\n`);
-
-    // Phase 3: track plates
-
-    process.stderr.write("Building tracks...\n");
-    const tracks = buildTracks(frameResults, videoInfo.fps);
-    process.stderr.write(`Identified ${tracks.length} track(s)\n`);
-
-    // Phase 4: obscure plates (optional)
+    const { frames, videoInfo } = await runExtraction(inputPath, framesDir);
+    await runPreProcessing(frames, videoInfo.width);
+    const frameResults = await runDetection(frames, regions, engine);
+    const tracks = runTrackBuilding(frameResults, videoInfo.fps);
 
     if (opts.obscureNumberPlates && opts.output) {
-      process.stderr.write("Obscuring plates...\n");
+      const extendFrames = Math.max(1, Math.round((opts.extendSeconds ?? 2) * videoInfo.fps));
+      const trackPolygons = await runTrackCoverage(tracks, frames, extendFrames);
 
       const obscureDir = path.join(tmpDir, "obscured");
       fs.mkdirSync(obscureDir);
-
-      // Build per-frame polygon coverage from detected tracks.
-      // Each track's history (including tracker-interpolated frames) is added
-      // first, then the coverage is extended by extendSeconds in both directions
-      // using the endpoint polygons. This ensures a plate detected in only a
-      // handful of frames (e.g. a stationary car in a short clip) is obscured
-      // throughout the visible region rather than for a single imperceptible frame.
-      const extendFrames = Math.max(
-        1,
-        Math.round((opts.extendSeconds ?? 2) * videoInfo.fps)
-      );
-      const trackPolygons = new Map<number, Point[][]>();
-
-      for (const track of tracks) {
-        if (track.history.length === 0) continue;
-
-        // Add every history entry (actual + interpolated detection positions).
-        for (const h of track.history) {
-          if (h.polygon.length < 3) continue;
-          const list = trackPolygons.get(h.frameIndex) ?? [];
-          list.push(h.polygon);
-          trackPolygons.set(h.frameIndex, list);
-        }
-
-        // Extend before first detection using the first entry's polygon.
-        const first = track.history[0];
-        const startFi = Math.max(0, first.frameIndex - extendFrames);
-        for (let fi = startFi; fi < first.frameIndex; fi++) {
-          if (first.polygon.length < 3) continue;
-          const list = trackPolygons.get(fi) ?? [];
-          list.push(first.polygon);
-          trackPolygons.set(fi, list);
-        }
-
-        // Extend after last detection using the last entry's polygon.
-        const last = track.history[track.history.length - 1];
-        const endFi = Math.min(frames.length - 1, last.frameIndex + extendFrames);
-        for (let fi = last.frameIndex + 1; fi <= endFi; fi++) {
-          if (last.polygon.length < 3) continue;
-          const list = trackPolygons.get(fi) ?? [];
-          list.push(last.polygon);
-          trackPolygons.set(fi, list);
-        }
-      }
-
-      process.stderr.write(`${trackPolygons.size} frame(s) scheduled for obscuring\n`);
-
-      let obscured = 0;
-      for (const frame of frames) {
-        const polygons = trackPolygons.get(frame.frameIndex) ?? [];
-        const syntheticDetections: PlateDetection[] = polygons.map((polygon) => ({
-          plate: "",
-          confidence: 0,
-          region: null,
-          regionConfidence: 0,
-          polygon,
-          frameIndex: frame.frameIndex,
-        }));
-        const outFramePath = path.join(obscureDir, path.basename(frame.filePath));
-        await obscureFrame(frame.filePath, syntheticDetections, outFramePath);
-        if (syntheticDetections.some((d) => d.polygon.length >= 3)) obscured++;
-      }
-
-      process.stderr.write(
-        `Obscured ${obscured} frame(s); composing output video...\n`
-      );
-
-      await composeVideo(
+      await runObscuring(frames, trackPolygons, obscureDir);
+      await runComposition(
         obscureDir,
         videoInfo.fps,
         inputPath,
         path.resolve(opts.output),
-        (frame) => process.stderr.write(`  Composing frame ${frame}\r`)
+        frames.length,
       );
-
-      process.stderr.write(`\nOutput video written to ${opts.output}\n`);
     }
-
-    // Phase 5: output JSON
 
     const resolvedOutput =
       opts.obscureNumberPlates && opts.output ? path.resolve(opts.output) : null;
-
     const firstPlateAt =
       tracks.length > 0
         ? Math.round(Math.min(...tracks.map((t) => t.history[0].timestamp)) * 1000)
@@ -257,7 +143,6 @@ async function main(opts: {
             Math.max(...tracks.map((t) => t.history[t.history.length - 1].timestamp)) * 1000
           )
         : 0;
-    const processingDuration = Date.now() - startTime;
 
     const doc = buildOutputDoc(
       {
@@ -268,7 +153,7 @@ async function main(opts: {
       },
       tracks,
       videoInfo.durationSeconds,
-      processingDuration,
+      Date.now() - startTime,
       firstPlateAt,
       lastPlateAt,
       resolvedOutput,

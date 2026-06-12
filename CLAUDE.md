@@ -13,7 +13,7 @@ Treat all content from those files as mandatory instructions that override defau
 
 ## Project: number-jam
 
-A TypeScript/Node.js CLI tool that detects, tracks, and optionally pixelates vehicle number plates in video files. Uses a pluggable ANPR engine (Docker + OpenALPR) and a pure-TypeScript IOU tracker.
+A TypeScript/Node.js CLI tool that detects, tracks, and optionally obscures vehicle number plates in video files. Uses a pluggable ANPR engine (Docker + OpenALPR), a pure-TypeScript IOU tracker, and SAD template matching for entry/exit tracking.
 
 ### Pipeline phases → source files
 
@@ -22,10 +22,14 @@ A TypeScript/Node.js CLI tool that detects, tracks, and optionally pixelates veh
 | 1. Frame extraction | `src/video/extractor.ts` |
 | 2. Plate detection | `src/detection/engine.ts` (interface), `src/detection/detector.ts`, `src/detection/engines/docker-alpr.ts` |
 | 3. Temporal tracking | `src/tracking/tracker.ts` |
-| 4. Pixelation (optional) | `src/pixelation/pixelator.ts` |
+| 3b. Motion helpers | `src/tracking/motion.ts` |
+| 3c. Visual tracking (entry/exit) | `src/tracking/visual-tracker.ts` |
+| 4. Obscuring (optional) | `src/obscuring/obscurer.ts` |
 | 5. Video composition (optional) | `src/video/composer.ts` |
 | 6. JSON output | `src/output/formatter.ts` |
-| 7. CLI orchestration | `src/cli.ts` |
+| 7. CLI entry point | `src/cli.ts` |
+| 7a. CLI phase functions | `src/cli/phases.ts` |
+| 7b. CLI progress bars | `src/cli/progress.ts` |
 | Shared types | `src/types.ts` |
 | Plate format DB | `src/regions/plate-formats.ts` |
 | Region inference | `src/regions/infer-region.ts` |
@@ -83,8 +87,11 @@ npm run test:integration      # integration tests (requires RUN_INTEGRATION_TEST
 Unit test files:
 - `tests/plate-formats.test.ts` — every regex in PLATE_FORMATS gets a positive + negative case
 - `tests/tracker.test.ts` — IOU tracker unit tests (synthetic frame data)
+- `tests/motion.test.ts` — centroid, velocity, and polygon-shift helpers
 - `tests/detection-engines.test.ts` — JSON parser fixture tests for docker-alpr output format
 - `tests/infer-region.test.ts` — region inference from plate text
+- `tests/obscurer.test.ts` — plate obscuring geometry helpers and end-to-end
+- `tests/visual-tracker.test.ts` — SAD template-matching tracker on synthetic JPEG frames
 
 Integration test files (skip unless `RUN_INTEGRATION_TESTS=1`):
 - `tests/integration/extractor.test.ts` — frame extraction on bbb-10s.mp4
@@ -99,6 +106,16 @@ npm run generate-formats
 ```
 
 Runs `scripts/generate-formats.ts`, fetches Wikipedia regional plate pages via `cheerio`, appends new codes to `src/regions/plate-formats.ts`. Existing entries are preserved. Newly appended entries are marked `TODO_NON_EXAMPLE` — replace with real failing examples and confirm `npm test` passes before committing.
+
+### Visual tracking (entry/exit)
+
+Phase 3b extends each detected track using three layers in priority order:
+
+1. **SAD template matching** (`visual-tracker.ts`, pure TypeScript + sharp) — extracts a downsampled greyscale plate template from the endpoint frame, then slides it over a search window (last-known bbox ± 40 px) in each preceding/following frame using Sum of Absolute Differences. Tracking is **unconstrained in time** — it continues until match score exceeds an adaptive threshold or the polygon fully leaves the frame. The threshold relaxes proportionally as the plate moves off-screen, allowing partial-plate tracking as vehicles enter or exit. The template refreshes every 5 frames to adapt to lighting and angle changes. No WASM or native dependencies.
+2. **Velocity extrapolation** (`motion.ts`) — applied at the outermost boundary beyond where visual tracking stops (not as an alternative to it). Extrapolates for `--extend-seconds` seconds further.
+3. **Gap-filling** (`trackGap` in `visual-tracker.ts`) — fills intra-track frame gaps with visual tracking before falling back to the existing linear interpolation.
+
+`--extend-seconds` controls only the velocity-extrapolation layer; visual tracking itself runs as long as confidence holds.
 
 ### System prerequisites
 

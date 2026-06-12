@@ -1,8 +1,8 @@
 # number-jam
 
-Detect, track, and optionally pixelate vehicle number plates in video files.
+Detect, track, and optionally obscure vehicle number plates in video files.
 
-number-jam scans every frame of a video using an ANPR engine, links detections across frames into continuous tracks (including partial/unreadable plates), and emits a structured JSON document. When given `--pixelate-number-plates`, it also produces a new video file with the plate regions blurred.
+number-jam scans every frame of a video using an ANPR engine, links detections across frames into continuous tracks (including partial/unreadable plates), and emits a structured JSON document. When given `--obscure-number-plates`, it also produces a new video file with the plate regions obscured using feathered colour fills. Entry and exit frames are covered using SAD template matching so the obscuring follows the plate as it enters or leaves the frame.
 
 ---
 
@@ -59,11 +59,11 @@ npm run build
 # Filter by region (comma-separated ISO codes)
 ./run-mac.sh -i video.mp4 -r gb,de,fr
 
-# Detect and pixelate plates in an output video
-./run-mac.sh -i video.mp4 -o output.mp4 --pixelate-number-plates
+# Detect and obscure plates in an output video
+./run-mac.sh -i video.mp4 -o output.mp4 --obscure-number-plates
 
-# Use the fast-alpr engine instead of Docker
-./run-mac.sh --engine fast-alpr -i video.mp4
+# Extend obscuring 3 seconds before/after each track
+./run-mac.sh -i video.mp4 -o output.mp4 --obscure-number-plates --extend-seconds 3
 
 # Pipe JSON output to a file
 ./run-mac.sh -i video.mp4 > results.json
@@ -76,10 +76,12 @@ On Linux, replace `./run-mac.sh` with `./run-linux.sh`.
 | Flag | Description |
 |---|---|
 | `-i`, `--input <path>` | Path to the input video file **(required)** |
-| `-o`, `--output <path>` | Path for the pixelated output video *(required with `-p`)* |
-| `-p`, `--pixelate-number-plates` | Pixelate detected plates in an output video |
+| `-o`, `--output <path>` | Path for the obscured output video *(required with `-p`)* |
+| `-p`, `--obscure-number-plates` | Obscure detected plates in an output video |
 | `-r`, `--regions <codes>` | Comma-separated region codes (e.g. `gb,de,us`). Defaults to all. |
-| `--engine <id>` | ANPR backend: `docker-alpr` *(default)* or `fast-alpr` |
+| `--extend-seconds <n>` | Extend obscuring N seconds before/after each track (default: 2) |
+| `--min-confidence <n>` | Drop detections below this OCR confidence threshold (0–100) |
+| `--include-tracking` | Include full frame-by-frame polygon history in JSON output |
 
 ### Region codes
 
@@ -96,7 +98,7 @@ The tool prints a single JSON document to stdout:
   "request": {
     "path": "video.mp4",       // input path as given
     "regions": ["gb", "de"],   // region filter ("*" = all)
-    "pixelate": false
+    "obscure": false
   },
   "summary": [
     { "plate": "AB12CDE", "region": "gb" },
@@ -139,7 +141,10 @@ npm run test:integration
 Unit test files:
 - **plate-formats.test.ts** — every regex in the plate-formats database is exercised with at least one passing and one failing example
 - **tracker.test.ts** — IOU tracker logic (assignment, gap-filling, track closure)
-- **detection-engines.test.ts** — JSON parser fixtures for docker-alpr and fast-alpr output formats
+- **detection-engines.test.ts** — JSON parser fixtures for docker-alpr output format
+- **motion.test.ts** — centroid, velocity, and polygon-shift helpers
+- **visual-tracker.test.ts** — SAD template-matching tracker on synthetic JPEG frames
+- **obscurer.test.ts** — plate obscuring geometry helpers and end-to-end
 - **infer-region.test.ts** — region inference utility (plate text → ISO region code)
 
 Integration tests (`tests/integration/`) require `RUN_INTEGRATION_TESTS=1` and use public-domain video and image fixtures. See `tests/fixtures/ATTRIBUTION.md` for licence details.
@@ -160,15 +165,16 @@ number-jam/
 │   │   ├── engine.ts                  DetectionEngine interface
 │   │   ├── detector.ts                Iterate frames and collect detections
 │   │   └── engines/
-│   │       ├── docker-alpr.ts         Docker + OpenALPR HTTP backend
-│   │       └── fast-alpr.ts           Python fast-alpr stdio daemon backend
+│   │       └── docker-alpr.ts         Docker + OpenALPR HTTP backend
 │   ├── tracking/
-│   │   └── tracker.ts                 IOU-based multi-frame tracker with gap interpolation
-│   ├── pixelation/
-│   │   └── pixelator.ts               Block-pixelate plate regions using sharp
+│   │   ├── tracker.ts                 IOU-based multi-frame tracker with gap interpolation
+│   │   ├── motion.ts                  Centroid, velocity, and polygon-shift helpers
+│   │   └── visual-tracker.ts          SAD template-matching tracker for entry/exit frames
+│   ├── obscuring/
+│   │   └── obscurer.ts                Feathered colour-fill obscuring of plate polygons
 │   ├── regions/
 │   │   ├── plate-formats.ts           International plate format regex database
-│   │   └── infer-region.ts            Infer region from plate text (used by fast-alpr engine)
+│   │   └── infer-region.ts            Infer region from plate text
 │   └── output/
 │       └── formatter.ts               Build the final JSON output document
 ├── docker/
@@ -177,20 +183,21 @@ number-jam/
 ├── scripts/
 │   ├── install-mac.sh                 macOS prerequisite installer
 │   ├── install-linux.sh               Linux prerequisite installer
-│   ├── detect-frame.py                fast-alpr Python stdio daemon
 │   ├── download-fixtures.ts           Downloads test fixture files (idempotent)
 │   └── generate-formats.ts            Wikipedia scraper (refreshes plate-formats.ts)
 ├── tests/
 │   ├── plate-formats.test.ts
 │   ├── tracker.test.ts
+│   ├── motion.test.ts
 │   ├── detection-engines.test.ts
+│   ├── visual-tracker.test.ts
+│   ├── obscurer.test.ts
 │   ├── infer-region.test.ts
 │   ├── fixtures/
 │   │   └── ATTRIBUTION.md             Licence information for test fixtures
 │   └── integration/
 │       ├── extractor.test.ts
-│       ├── docker-alpr.test.ts
-│       └── fast-alpr.test.ts
+│       └── docker-alpr.test.ts
 ├── run-mac.sh                         Launch script for macOS
 └── run-linux.sh                       Launch script for Linux
 ```
