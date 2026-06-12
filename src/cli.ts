@@ -117,7 +117,9 @@ async function main(opts: {
 
     if (opts.obscureNumberPlates && opts.output) {
       const extendFrames = Math.max(1, Math.round((opts.extendSeconds ?? 2) * videoInfo.fps));
-      const trackPolygons = await runTrackCoverage(tracks, frames, extendFrames);
+      const trackPolygons = await runTrackCoverage(
+        tracks, frames, extendFrames, videoInfo.width, videoInfo.height,
+      );
 
       const obscureDir = path.join(tmpDir, "obscured");
       fs.mkdirSync(obscureDir);

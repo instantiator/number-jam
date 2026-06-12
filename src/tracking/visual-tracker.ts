@@ -39,6 +39,17 @@ const TEMPLATE_UPDATE_INTERVAL = 5;
  */
 const MAX_EXTENSION_FRAMES = 18_000;
 
+/**
+ * Minimum fraction of the polygon's bounding box that must be visible within
+ * the frame for tracking to continue. Below this threshold the template match
+ * is unreliable (there is almost no plate signal), and any polygon produced
+ * would clip to a strip too thin to obscure meaningful content.
+ *
+ * Exported so callers can pass the same value to velocity-extrapolation
+ * filters, ensuring consistent behaviour across both mechanisms.
+ */
+export const MIN_VISIBLE_FRACTION = 0.01;
+
 /** A single frame entry produced by the visual tracker. */
 export interface TrackedFrame {
   frameIndex: number;
@@ -47,16 +58,20 @@ export interface TrackedFrame {
 
 /**
  * Track the plate polygon backwards from the first history entry.
- * Runs until match confidence drops or the polygon fully leaves the frame.
+ * Runs until match confidence drops, the polygon is less than
+ * {@link minVisibleFraction} visible, or it fully leaves the frame.
  *
- * @param frames All extracted frames (used to map frameIndex → file path).
- * @param track  The track whose starting endpoint is used as the anchor.
- * @returns      Tracked frames in descending frameIndex order, or an empty
- *               array when the template is too small or the match fails immediately.
+ * @param frames              All extracted frames (used to map frameIndex → file path).
+ * @param track               The track whose starting endpoint is used as the anchor.
+ * @param minVisibleFraction  Stop tracking when this fraction of the polygon is outside
+ *                            the frame (default: {@link MIN_VISIBLE_FRACTION}).
+ * @returns                   Tracked frames in descending frameIndex order, or an empty
+ *                            array when the template is too small or the match fails immediately.
  */
 export async function trackBack(
   frames: FrameInfo[],
   track: Track,
+  minVisibleFraction = MIN_VISIBLE_FRACTION,
 ): Promise<TrackedFrame[]> {
   const first = track.history[0];
   if (!first) return [];
@@ -66,20 +81,25 @@ export async function trackBack(
     first.frameIndex,
     "back",
     Math.max(0, first.frameIndex - MAX_EXTENSION_FRAMES),
+    minVisibleFraction,
   );
 }
 
 /**
  * Track the plate polygon forwards from the last history entry.
- * Runs until match confidence drops or the polygon fully leaves the frame.
+ * Runs until match confidence drops, the polygon is less than
+ * {@link minVisibleFraction} visible, or it fully leaves the frame.
  *
- * @param frames All extracted frames.
- * @param track  The track whose exit endpoint is used as the anchor.
- * @returns      Tracked frames in ascending frameIndex order, or an empty array.
+ * @param frames              All extracted frames.
+ * @param track               The track whose exit endpoint is used as the anchor.
+ * @param minVisibleFraction  Stop tracking when this fraction of the polygon is outside
+ *                            the frame (default: {@link MIN_VISIBLE_FRACTION}).
+ * @returns                   Tracked frames in ascending frameIndex order, or an empty array.
  */
 export async function trackForward(
   frames: FrameInfo[],
   track: Track,
+  minVisibleFraction = MIN_VISIBLE_FRACTION,
 ): Promise<TrackedFrame[]> {
   const last = track.history[track.history.length - 1];
   if (!last) return [];
@@ -90,6 +110,7 @@ export async function trackForward(
     last.frameIndex,
     "forward",
     Math.min(lastFi, last.frameIndex + MAX_EXTENSION_FRAMES),
+    minVisibleFraction,
   );
 }
 
@@ -98,15 +119,18 @@ export async function trackForward(
  * matching. Tracks forward from {@link fromEntry} toward {@link toEntry},
  * stopping when confidence drops before the gap is fully bridged.
  *
- * @param frames     All extracted frames.
- * @param fromEntry  Earlier history entry (provides the anchor template).
- * @param toEntry    Later history entry (exclusive stop frame).
- * @returns          Tracked frames in ascending frameIndex order.
+ * @param frames              All extracted frames.
+ * @param fromEntry           Earlier history entry (provides the anchor template).
+ * @param toEntry             Later history entry (exclusive stop frame).
+ * @param minVisibleFraction  Stop tracking when this fraction of the polygon is outside
+ *                            the frame (default: {@link MIN_VISIBLE_FRACTION}).
+ * @returns                   Tracked frames in ascending frameIndex order.
  */
 export async function trackGap(
   frames: FrameInfo[],
   fromEntry: TrackHistoryEntry,
   toEntry: TrackHistoryEntry,
+  minVisibleFraction = MIN_VISIBLE_FRACTION,
 ): Promise<TrackedFrame[]> {
   if (toEntry.frameIndex - fromEntry.frameIndex <= 1) return [];
   return trackSegment(
@@ -115,6 +139,7 @@ export async function trackGap(
     fromEntry.frameIndex,
     "forward",
     toEntry.frameIndex - 1,
+    minVisibleFraction,
   );
 }
 
@@ -204,11 +229,13 @@ function bestMatch(
  * Core tracking loop shared by {@link trackBack}, {@link trackForward}, and
  * {@link trackGap}.
  *
- * Advances one frame at a time in the given direction, stopping when match
- * confidence drops below the adaptive threshold (which relaxes as the plate
- * moves off-screen) or the polygon fully exits the frame. The template is
- * periodically refreshed from the current matched region to adapt to changes
- * in lighting and plate angle.
+ * Advances one frame at a time in the given direction, stopping when:
+ * - the polygon's visible fraction drops below {@link minVisibleFraction},
+ * - the match score exceeds the adaptive threshold, or
+ * - the polygon fully exits the frame.
+ *
+ * The template is periodically refreshed from the current matched region to
+ * adapt to gradual changes in lighting and plate angle.
  */
 async function trackSegment(
   frames: FrameInfo[],
@@ -216,6 +243,7 @@ async function trackSegment(
   anchorFrameIndex: number,
   direction: "back" | "forward",
   limitFrameIndex: number,
+  minVisibleFraction: number,
 ): Promise<TrackedFrame[]> {
   const isBack = direction === "back";
   const frameMap = new Map(frames.map((f) => [f.frameIndex, f]));
@@ -253,6 +281,11 @@ async function trackSegment(
     const frameInfo = frameMap.get(fi);
     if (!frameInfo) continue;
 
+    // Stop early when the polygon has nearly left the frame; the template is
+    // unreliable at this point and any match would obscure an invisible sliver.
+    const vis = visibleFraction(polygon, frameW, frameH);
+    if (vis < minVisibleFraction) break;
+
     // Use the unclamped bbox to correctly center the search window even when
     // the polygon has partially moved off-screen.
     const pBbox = rawBbox(polygon);
@@ -283,7 +316,6 @@ async function trackSegment(
 
     // Relax the threshold proportionally to how much of the polygon has moved
     // off-screen: a partially visible plate naturally produces a higher SAD score.
-    const vis = visibleFraction(polygon, frameW, frameH);
     const effectiveThreshold = MATCH_THRESHOLD + (1 - vis) * EDGE_THRESHOLD_BOOST;
     if (score > effectiveThreshold) break;
 

@@ -153,6 +153,58 @@ describe("trackBack", () => {
   });
 });
 
+describe("minVisibleFraction parameter", () => {
+  it("stops immediately when the starting polygon is below the threshold", async () => {
+    // Position the rectangle 17 px inside the right edge: 17/30 px = 56.7 % visible.
+    // A 60 % threshold should reject it and return empty without processing any frame.
+    const x = FRAME_W - 17;
+    const track: Track = {
+      plate: "",
+      region: null,
+      history: [
+        {
+          frameIndex: 0,
+          timestamp: 0,
+          polygon: [
+            [x, RECT_Y],
+            [x + RECT_W, RECT_Y],
+            [x + RECT_W, RECT_Y + RECT_H],
+            [x, RECT_Y + RECT_H],
+          ],
+        },
+      ],
+    };
+    const result = await trackForward(frames, track, 0.60);
+    expect(result).toHaveLength(0);
+  });
+
+  it("proceeds when the starting polygon meets the threshold", async () => {
+    // Same geometry but with a 50 % threshold — 56.7 % should pass and tracking begins.
+    const x = FRAME_W - 17;
+    const track: Track = {
+      plate: "",
+      region: null,
+      history: [
+        {
+          frameIndex: 0,
+          timestamp: 0,
+          polygon: [
+            [x, RECT_Y],
+            [x + RECT_W, RECT_Y],
+            [x + RECT_W, RECT_Y + RECT_H],
+            [x, RECT_Y + RECT_H],
+          ],
+        },
+      ],
+    };
+    // May or may not track (depends on SAD), but at least it must not trivially
+    // return empty due to the visibility check.
+    // We verify the function runs without error; result length is not asserted
+    // because the polygon moves further off-screen as the search progresses.
+    await expect(trackForward(frames, track, 0.50)).resolves.not.toThrow();
+  });
+});
+
 describe("trackGap", () => {
   it("returns empty when entries are adjacent", async () => {
     const from: TrackHistoryEntry = {

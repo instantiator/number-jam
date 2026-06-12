@@ -13,7 +13,7 @@ import pLimit from "p-limit";
 import { getVideoInfo, extractFrames as rawExtractFrames, VideoInfo } from "../video/extractor";
 import { detectAllFrames } from "../detection/detector";
 import { buildTracks } from "../tracking/tracker";
-import { trackBack, trackForward, trackGap } from "../tracking/visual-tracker";
+import { trackBack, trackForward, trackGap, MIN_VISIBLE_FRACTION } from "../tracking/visual-tracker";
 import { velocityFromHead, velocityFromTail, shiftPolygon } from "../tracking/motion";
 import { obscureFrame } from "../obscuring/obscurer";
 import { composeVideo } from "../video/composer";
@@ -97,6 +97,22 @@ export async function runDetection(
   return results;
 }
 
+// Fraction of a polygon's bounding box that is visible within a frame of
+// dimensions (w × h). Mirrors the logic in visual-tracker.ts without coupling
+// the two modules on a shared internal utility.
+function polygonVisibleFraction(polygon: Point[], w: number, h: number): number {
+  const xs = polygon.map(([x]) => x);
+  const ys = polygon.map(([, y]) => y);
+  const left = Math.min(...xs), right = Math.max(...xs);
+  const top = Math.min(...ys), bottom = Math.max(...ys);
+  const totalArea = (right - left) * (bottom - top);
+  if (totalArea <= 0) return 0;
+  const vW = Math.min(w, right) - Math.max(0, left);
+  const vH = Math.min(h, bottom) - Math.max(0, top);
+  if (vW <= 0 || vH <= 0) return 0;
+  return (vW * vH) / totalArea;
+}
+
 /**
  * Phase 3: build multi-frame tracks from per-frame detections.
  *
@@ -116,15 +132,22 @@ export function runTrackBuilding(frameResults: FrameResult[], fps: number): Trac
  *
  * All tracks are extended in parallel.
  *
- * @param tracks        Tracks from {@link runTrackBuilding}.
- * @param frames        All extracted frames.
- * @param extendFrames  Number of frames to velocity-extrapolate beyond the point
- *                      where visual tracking stops.
+ * @param tracks               Tracks from {@link runTrackBuilding}.
+ * @param frames               All extracted frames.
+ * @param extendFrames         Number of frames to velocity-extrapolate beyond the point
+ *                             where visual tracking stops.
+ * @param frameW               Frame pixel width (used to filter off-screen polygons).
+ * @param frameH               Frame pixel height.
+ * @param minVisibleFraction   Polygons with less than this visible fraction are not
+ *                             added to the coverage map (default: {@link MIN_VISIBLE_FRACTION}).
  */
 export async function runTrackCoverage(
   tracks: Track[],
   frames: FrameInfo[],
   extendFrames: number,
+  frameW: number,
+  frameH: number,
+  minVisibleFraction = MIN_VISIBLE_FRACTION,
 ): Promise<Map<number, Point[][]>> {
   const trackPolygons = new Map<number, Point[][]>();
 
@@ -152,8 +175,8 @@ export async function runTrackCoverage(
 
       // Unconstrained visual tracking from each endpoint, run in parallel.
       const [backCoverage, fwdCoverage] = await Promise.all([
-        trackBack(frames, track),
-        trackForward(frames, track),
+        trackBack(frames, track, minVisibleFraction),
+        trackForward(frames, track, minVisibleFraction),
       ]);
 
       // Fill any intra-track frame gaps (e.g. from occlusion) with visual tracking.
@@ -176,10 +199,10 @@ export async function runTrackCoverage(
       const startFi = Math.max(0, anchorBack.frameIndex - extendFrames);
       for (let fi = startFi; fi < anchorBack.frameIndex; fi++) {
         const steps = anchorBack.frameIndex - fi;
-        backExt.push({
-          frameIndex: fi,
-          polygon: shiftPolygon(anchorBack.polygon, -velHead[0] * steps, -velHead[1] * steps),
-        });
+        const polygon = shiftPolygon(anchorBack.polygon, -velHead[0] * steps, -velHead[1] * steps);
+        if (polygonVisibleFraction(polygon, frameW, frameH) >= minVisibleFraction) {
+          backExt.push({ frameIndex: fi, polygon });
+        }
       }
 
       const anchorFwd = fwdCoverage.length > 0
@@ -190,10 +213,10 @@ export async function runTrackCoverage(
       const endFi = Math.min(frames.length - 1, anchorFwd.frameIndex + extendFrames);
       for (let fi = anchorFwd.frameIndex + 1; fi <= endFi; fi++) {
         const steps = fi - anchorFwd.frameIndex;
-        fwdExt.push({
-          frameIndex: fi,
-          polygon: shiftPolygon(anchorFwd.polygon, velTail[0] * steps, velTail[1] * steps),
-        });
+        const polygon = shiftPolygon(anchorFwd.polygon, velTail[0] * steps, velTail[1] * steps);
+        if (polygonVisibleFraction(polygon, frameW, frameH) >= minVisibleFraction) {
+          fwdExt.push({ frameIndex: fi, polygon });
+        }
       }
 
       // Merge all coverage; history entries already present take priority.
