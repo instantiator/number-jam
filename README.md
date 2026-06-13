@@ -18,7 +18,7 @@ This project containerises OpenALPR, and supplements its findings with additiona
 - Falls back to velocity extrapolation
 
 ```mermaid
-flowchart LR
+flowchart TD
     A([Input video]) --> B[Extract frames\nffmpeg]
     B --> C[Pre-process frames\nsharp — sharpen + normalise]
     C --> D[Detect plates\nDocker + OpenALPR]
