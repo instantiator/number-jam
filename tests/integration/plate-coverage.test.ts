@@ -38,6 +38,7 @@ import {
   runTrackCoverage,
   runObscuring,
 } from "../../src/cli/phases";
+import { runCharacterScan } from "../../src/cli/character-scan";
 import { Point } from "../../src/types";
 
 // Source video — not a public fixture, lives in the repo working tree.
@@ -110,7 +111,8 @@ describe("plate-coverage integration", () => {
 
       const { frames, videoInfo } = await runExtraction(clipPath, framesDir);
       await runPreProcessing(frames, videoInfo.width);
-      const frameResults = await runDetection(frames, ["gb"], engine);
+      const rawFrameResults = await runDetection(frames, ["gb"], engine);
+      const frameResults = await runCharacterScan(frames, rawFrameResults, videoInfo.width, videoInfo.height);
       const tracks = runTrackBuilding(frameResults, videoInfo.fps);
 
       const fps = videoInfo.fps;
@@ -195,62 +197,71 @@ describe("plate-coverage integration", () => {
       }
 
       // --- Assertion (f): obscured plate regions contain no readable text ---
-      // For each frame where ANPR found the plate near the top (the region most
-      // likely to show visible characters), crop the detection bounding box from
-      // the obscured frame and run OCR. Require that no alphanumeric word of
-      // length ≥ 2 appears with confidence > 50 %.
-      if (detectedNearTop.size > 0) {
-        const worker = await createWorker("eng");
-        try {
-          // Sample up to 5 detection frames near the top to keep test time reasonable.
-          const sampleFrames = [...detectedNearTop.keys()].sort((a, b) => a - b).slice(0, 5);
+      // Sample covered frames spread evenly across the full plate-visible window
+      // (not just ANPR detection frames). This catches failures in velocity-
+      // extrapolated or visual-tracking-extended frames where characters may
+      // still be visible even though ANPR never fired there.
+      {
+        const visibleCoveredFrames = [...trackPolygons.keys()]
+          .filter((fi) => fi >= visibleStartFi)
+          .sort((a, b) => a - b);
 
-          for (const fi of sampleFrames) {
-            const obscuredPath = path.join(obscureDir, path.basename(frames[fi].filePath));
-            if (!fs.existsSync(obscuredPath)) continue;
+        if (visibleCoveredFrames.length > 0) {
+          const worker = await createWorker("eng");
+          try {
+            // Sample up to 8 frames spread evenly across the visible window.
+            const N = 8;
+            const step = Math.max(1, Math.floor(visibleCoveredFrames.length / N));
+            const sampleFrames = visibleCoveredFrames.filter((_, i) => i % step === 0).slice(0, N);
 
-            // Build bounding box from all near-top detection polygons in this frame.
-            const detPolygons = detectedNearTop.get(fi)!;
-            const allPts = detPolygons.flat();
-            const detLeft = Math.max(0, Math.min(...allPts.map(([x]) => x)) - 20);
-            const detTop = Math.max(0, Math.min(...allPts.map(([, y]) => y)) - 20);
-            const detRight = Math.min(videoInfo.width, Math.max(...allPts.map(([x]) => x)) + 20);
-            const detBottom = Math.min(videoInfo.height, Math.max(...allPts.map(([, y]) => y)) + 20);
-            const cropW = detRight - detLeft;
-            const cropH = detBottom - detTop;
-            if (cropW < 4 || cropH < 4) continue;
+            for (const fi of sampleFrames) {
+              const obscuredPath = path.join(obscureDir, path.basename(frames[fi].filePath));
+              if (!fs.existsSync(obscuredPath)) continue;
 
-            const cropPath = path.join(tmpDir, `ocr-crop-${fi}.jpg`);
-            await sharp(obscuredPath)
-              .extract({ left: detLeft, top: detTop, width: cropW, height: cropH })
-              .jpeg({ quality: 95 })
-              .toFile(cropPath);
+              const coveragePolygons = trackPolygons.get(fi)!;
+              if (!coveragePolygons.length) continue;
 
-            const result = await worker.recognize(cropPath);
+              // Crop the coverage polygon bbox (with padding) from the obscured frame.
+              const allPts = coveragePolygons.flat();
+              const covLeft = Math.max(0, Math.min(...allPts.map(([x]) => x)) - 10);
+              const covTop = Math.max(0, Math.min(...allPts.map(([, y]) => y)) - 10);
+              const covRight = Math.min(videoInfo.width, Math.max(...allPts.map(([x]) => x)) + 10);
+              const covBottom = Math.min(videoInfo.height, Math.max(...allPts.map(([, y]) => y)) + 10);
+              const cropW = covRight - covLeft;
+              const cropH = covBottom - covTop;
+              if (cropW < 4 || cropH < 4) continue;
 
-            // Flatten the word tree: blocks → paragraphs → lines → words.
-            const words = (result.data.blocks ?? [])
-              .flatMap((b) => b.paragraphs)
-              .flatMap((p) => p.lines)
-              .flatMap((l) => l.words)
-              .filter((w) => w.confidence > 50);
+              const cropPath = path.join(tmpDir, `ocr-crop-${fi}.jpg`);
+              await sharp(obscuredPath)
+                .extract({ left: covLeft, top: covTop, width: cropW, height: cropH })
+                .jpeg({ quality: 95 })
+                .toFile(cropPath);
 
-            const readableAlphanumChars = words
-              .map((w) => w.text.replace(/[^a-zA-Z0-9]/g, ""))
-              .filter((t) => t.length >= 2)
-              .join("");
+              const result = await worker.recognize(cropPath);
 
-            expect(readableAlphanumChars).toBe(
-              "",
-              `Frame ${fi}: tesseract found readable plate text "${readableAlphanumChars}" in the obscured region`,
-            );
+              const words = (result.data.blocks ?? [])
+                .flatMap((b) => b.paragraphs)
+                .flatMap((p) => p.lines)
+                .flatMap((l) => l.words)
+                .filter((w) => w.confidence > 50);
+
+              const readableAlphanumChars = words
+                .map((w) => w.text.replace(/[^a-zA-Z0-9]/g, ""))
+                .filter((t) => t.length >= 2)
+                .join("");
+
+              expect(readableAlphanumChars).toBe(
+                "",
+                `Frame ${fi}: tesseract found readable plate text "${readableAlphanumChars}" in obscured coverage region`,
+              );
+            }
+          } finally {
+            await worker.terminate();
           }
-        } finally {
-          await worker.terminate();
         }
       }
     },
-    900_000,  // 15 min — Docker startup + ANPR detection + obscuring + OCR
+    1_200_000,  // 20 min — Docker startup + ANPR + character scan + obscuring + OCR
   );
 
   it.skipIf(SKIP_INTEGRATION)(

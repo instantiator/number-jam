@@ -21,6 +21,7 @@ A TypeScript/Node.js CLI tool that detects, tracks, and optionally obscures vehi
 |---|---|
 | 1. Frame extraction | `src/video/extractor.ts` |
 | 2. Plate detection | `src/detection/engine.ts` (interface), `src/detection/detector.ts`, `src/detection/engines/docker-alpr.ts` |
+| 2b. Character scan (optional, obscuring only) | `src/cli/character-scan.ts` |
 | 3. Temporal tracking | `src/tracking/tracker.ts` |
 | 3b. Motion helpers | `src/tracking/motion.ts` |
 | 3c. Visual tracking (entry/exit) | `src/tracking/visual-tracker.ts` |
@@ -88,10 +89,13 @@ Unit test files:
 - `tests/plate-formats.test.ts` — every regex in PLATE_FORMATS gets a positive + negative case
 - `tests/tracker.test.ts` — IOU tracker unit tests (synthetic frame data)
 - `tests/motion.test.ts` — centroid, velocity, and polygon-shift helpers
+- `tests/phases.test.ts` — `velocityFromBackCoverage` helper unit tests
 - `tests/detection-engines.test.ts` — JSON parser fixture tests for docker-alpr output format
 - `tests/infer-region.test.ts` — region inference from plate text
 - `tests/obscurer.test.ts` — plate obscuring geometry helpers and end-to-end
+- `tests/polygon-merge.test.ts` — `mergeOverlappingPolygons` union-find unit tests
 - `tests/visual-tracker.test.ts` — SAD template-matching tracker on synthetic JPEG frames
+- `tests/character-scan.test.ts` — tesseract character scan on synthetic JPEG frames
 
 Integration test files (skip unless `RUN_INTEGRATION_TESTS=1`):
 - `tests/integration/extractor.test.ts` — frame extraction on bbb-10s.mp4
@@ -106,6 +110,16 @@ npm run generate-formats
 ```
 
 Runs `scripts/generate-formats.ts`, fetches Wikipedia regional plate pages via `cheerio`, appends new codes to `src/regions/plate-formats.ts`. Existing entries are preserved. Newly appended entries are marked `TODO_NON_EXAMPLE` — replace with real failing examples and confirm `npm test` passes before committing.
+
+### Character scan (phase 2b, obscuring only)
+
+`runCharacterScan` (`src/cli/character-scan.ts`) runs after ANPR detection and before track building when `--obscure-number-plates` is active. For each detection frame it:
+
+1. Expands the ANPR polygon horizontally by 50 % of the plate width on each side.
+2. Crops that expanded region and runs tesseract.js OCR on it.
+3. Any alphanumeric character found outside the ANPR polygon (with confidence > 40) causes the polygon to be widened to cover it.
+
+This corrects the common case where OpenALPR clips the first one or two characters (e.g. "HF" from "HF6CZB"). The widened polygon is then used as the template for SAD visual tracking, so all backward and forward coverage frames inherit the corrected width.
 
 ### Visual tracking (entry/exit)
 

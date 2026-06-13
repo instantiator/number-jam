@@ -14,7 +14,7 @@ import { getVideoInfo, extractFrames as rawExtractFrames, VideoInfo } from "../v
 import { detectAllFrames } from "../detection/detector";
 import { buildTracks } from "../tracking/tracker";
 import { trackBack, trackForward, trackGap, MIN_VISIBLE_FRACTION } from "../tracking/visual-tracker";
-import { velocityFromHead, velocityFromTail, shiftPolygon } from "../tracking/motion";
+import { centroid, velocityFromHead, velocityFromTail, shiftPolygon } from "../tracking/motion";
 import { obscureFrame } from "../obscuring/obscurer";
 import { composeVideo } from "../video/composer";
 import { createProgressBar } from "./progress";
@@ -222,6 +222,33 @@ function mergePolygonsInWindow(
 }
 
 /**
+ * Estimate per-frame velocity (dx, dy) from the entries in a backward-coverage
+ * array. backCoverage is in descending frameIndex order — element 0 is the
+ * frame immediately before the detection (newest in time), the last element is
+ * the furthest frame visual tracking reached (oldest). Uses the first `count`
+ * entries (closest to the detection) which are the most reliable.
+ *
+ * Returns [0, 0] when fewer than 2 entries are available or when the plate is
+ * stationary (all centroids coincide).
+ *
+ * Exported for unit testing.
+ */
+export function velocityFromBackCoverage(
+  backCoverage: Array<{ frameIndex: number; polygon: Point[] }>,
+  count = 4,
+): [number, number] {
+  if (backCoverage.length < 2) return [0, 0];
+  const slice = backCoverage.slice(0, Math.min(count, backCoverage.length));
+  const newest = slice[0];
+  const oldest = slice[slice.length - 1];
+  const span = newest.frameIndex - oldest.frameIndex;
+  if (span === 0) return [0, 0];
+  const [nx, ny] = centroid(newest.polygon);
+  const [ox, oy] = centroid(oldest.polygon);
+  return [(nx - ox) / span, (ny - oy) / span];
+}
+
+/**
  * Phase 3: build multi-frame tracks from per-frame detections.
  *
  * @param frameResults  Per-frame detection results from {@link runDetection}.
@@ -300,17 +327,16 @@ export async function runTrackCoverage(
         }
       }
 
-      // When the first detection is within 40 px of the top edge the plate is
-      // entering from above the frame. Backward SAD tracking will snap-back to
-      // y ≈ 0 and produce incorrect frozen polygons. Skip that coverage and use
-      // the first detection directly as the anchor for velocity extrapolation.
-      // 40 px mirrors SEARCH_MARGIN in visual-tracker.ts (kept local to avoid coupling).
-      const firstNearTopEdge = polygonMinY(first.polygon) < 40;
-      const anchorBack = (!firstNearTopEdge && backCoverage.length > 0)
+      const anchorBack = backCoverage.length > 0
         ? backCoverage[backCoverage.length - 1]
         : first;
 
-      const velHead = velocityFromHead(track.history);
+      // Prefer velocity estimated from backward visual-tracking results (closest
+      // frames to the detection, most reliable); fall back to track-history velocity.
+      const velFromCoverage = velocityFromBackCoverage(backCoverage);
+      const velHead: [number, number] = (velFromCoverage[0] !== 0 || velFromCoverage[1] !== 0)
+        ? velFromCoverage
+        : velocityFromHead(track.history);
       const nearTopEdge = polygonMinY(anchorBack.polygon) < 40;
       // Wider window when the plate is entering from the top — it may be
       // visible for several seconds before ANPR detects it.
@@ -357,12 +383,8 @@ export async function runTrackCoverage(
       }
 
       // Merge all coverage; history entries already present take priority.
-      // When the plate enters from the top edge, skip backCoverage (SAD snap-back
-      // positions are frozen at y ≈ 0 and would block the velocity-extrapolated
-      // positions that correctly exit the frame).
-      const backCoverageToUse = firstNearTopEdge ? [] : backCoverage;
       for (const { frameIndex, polygon } of [
-        ...backCoverageToUse,
+        ...backCoverage,
         ...fwdCoverage,
         ...gapCoverage,
         ...backExt,

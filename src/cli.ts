@@ -25,6 +25,7 @@ import {
   runObscuring,
   runComposition,
 } from "./cli/phases";
+import { runCharacterScan } from "./cli/character-scan";
 
 const program = new Command();
 
@@ -112,7 +113,12 @@ async function main(opts: {
 
     const { frames, videoInfo } = await runExtraction(inputPath, framesDir);
     await runPreProcessing(frames, videoInfo.width);
-    const frameResults = await runDetection(frames, regions, engine);
+    let frameResults = await runDetection(frames, regions, engine);
+
+    if (opts.obscureNumberPlates && opts.output) {
+      frameResults = await runCharacterScan(frames, frameResults, videoInfo.width, videoInfo.height);
+    }
+
     const tracks = runTrackBuilding(frameResults, videoInfo.fps);
 
     if (opts.obscureNumberPlates && opts.output) {
