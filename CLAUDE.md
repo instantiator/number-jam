@@ -96,6 +96,8 @@ Unit test files:
 - `tests/polygon-merge.test.ts` — `mergeOverlappingPolygons` union-find unit tests
 - `tests/visual-tracker.test.ts` — SAD template-matching tracker on synthetic JPEG frames
 - `tests/character-scan.test.ts` — tesseract character scan on synthetic JPEG frames
+- `tests/formatter.test.ts` — JSON output document builder
+- `tests/cli.test.ts` — `parseRegions` and `warnUnknownRegions` helpers
 
 Integration test files (skip unless `RUN_INTEGRATION_TESTS=1`):
 - `tests/integration/extractor.test.ts` — frame extraction on bbb-10s.mp4

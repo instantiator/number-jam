@@ -73,7 +73,7 @@ export interface RequestInfo {
   regions: string[];
   obscure: boolean;
   /** When true, the full per-frame tracking history is included in the output. */
-  includeTracking: boolean;
+  verbose: boolean;
 }
 
 /**
@@ -82,6 +82,10 @@ export interface RequestInfo {
 export interface PlateSummary {
   plate: string;
   region: string | null;
+  /** Earliest timestamp (ms from video start) the plate appears across all tracks. */
+  trackedFrom: number;
+  /** Latest timestamp (ms from video start) the plate appears across all tracks. */
+  trackedUntil: number;
 }
 
 /**
@@ -90,19 +94,16 @@ export interface PlateSummary {
 export interface OutputDoc {
   request: RequestInfo;
   summary: PlateSummary[];
-  /** Full per-frame tracking history. Empty array when --include-tracking is not set. */
+  /** Full per-frame tracking history. Empty array when --verbose is not set. */
   tracking: Array<{
     plate: string;
+    /** Timestamps are milliseconds from the video start, rounded to the nearest integer. */
     history: Array<{ timestamp: number; polygon: Point[] }>;
   }>;
-  /** Duration of the input video in seconds. */
+  /** Duration of the input video in milliseconds, rounded to the nearest integer. */
   videoDuration: number;
   /** Total wall-clock processing time in milliseconds. */
   processingDuration: number;
-  /** Timestamp (ms) of the earliest plate detection in the video. 0 when no plates were found. */
-  firstPlateAt: number;
-  /** Timestamp (ms) of the latest plate detection in the video. 0 when no plates were found. */
-  lastPlateAt: number;
   /** Resolved path to the output video, or null when obscuring was not performed. */
   output: string | null;
 }

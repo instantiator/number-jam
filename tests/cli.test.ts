@@ -80,4 +80,17 @@ describe("warnUnknownRegions", () => {
     expect(written.some((s) => s.includes("xx"))).toBe(true);
     expect(written.some((s) => s.includes("yy"))).toBe(true);
   });
+
+  it("lists all accepted region codes when an unknown code is provided", () => {
+    const written: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    warnUnknownRegions(["zz"]);
+    const combined = written.join("");
+    // Should include the accepted region codes section with at least one known code.
+    expect(combined).toContain("Accepted region codes");
+    expect(combined).toContain("gb");
+  });
 });

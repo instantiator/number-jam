@@ -21,24 +21,24 @@
  * The source video is the user's own recording and is not a downloadable fixture.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import * as path from "path";
-import * as fs from "fs";
-import * as os from "os";
 import { execFileSync } from "child_process";
 import ffmpegStatic from "ffmpeg-static";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import sharp from "sharp";
 import { createWorker } from "tesseract.js";
-import { DockerAlprEngine } from "../../src/detection/engines/docker-alpr";
-import {
-  runExtraction,
-  runPreProcessing,
-  runDetection,
-  runTrackBuilding,
-  runTrackCoverage,
-  runObscuring,
-} from "../../src/cli/phases";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCharacterScan } from "../../src/cli/character-scan";
+import {
+    runDetection,
+    runExtraction,
+    runObscuring,
+    runPreProcessing,
+    runTrackBuilding,
+    runTrackCoverage,
+} from "../../src/cli/phases";
+import { DockerAlprEngine } from "../../src/detection/engines/docker-alpr";
 import { Point } from "../../src/types";
 
 // Source video — not a public fixture, lives in the repo working tree.
@@ -250,9 +250,9 @@ describe("plate-coverage integration", () => {
                 .filter((t) => t.length >= 2)
                 .join("");
 
+              //`Frame ${fi}: tesseract found readable plate text "${readableAlphanumChars}" in obscured coverage region`,
               expect(readableAlphanumChars).toBe(
                 "",
-                `Frame ${fi}: tesseract found readable plate text "${readableAlphanumChars}" in obscured coverage region`,
               );
             }
           } finally {

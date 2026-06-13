@@ -2,55 +2,63 @@
 
 Detect, track, and optionally obscure vehicle number plates in video files.
 
-number-jam scans every frame of a video using an ANPR engine, links detections across frames into continuous tracks (including partial/unreadable plates), and emits a structured JSON document. When given `--obscure-number-plates`, it also produces a new video file with the plate regions obscured using feathered colour fills. Entry and exit frames are covered using SAD template matching so the obscuring follows the plate as it enters or leaves the frame.
-
 ---
 
-## Prerequisites
+## Overview
 
-| Dependency | Version | Install |
-|---|---|---|
-| Node.js | ≥ 18 | [nodejs.org](https://nodejs.org) |
-| Docker Desktop | any | see below |
-
-`ffmpeg` and `ffprobe` are **bundled** via npm packages — you do not need to install them separately.
-
-### Install the default ANPR engine (Docker + OpenALPR)
-
-**macOS:**
-```bash
-./scripts/install-mac.sh
-# or manually:
-brew install --cask docker-desktop
-docker build -t number-jam-alpr docker/
+```mermaid
+flowchart LR
+    A([Input video]) --> B[Extract frames\nffmpeg]
+    B --> C[Pre-process frames\nsharp — sharpen + normalise]
+    C --> D[Detect plates\nDocker + OpenALPR]
+    D --> E{--obscure set?}
+    E -->|Yes| F[Character scan\ntesseract.js — widen detection polygons]
+    E -->|No| G
+    F --> G[Build tracks\nIOU tracker + gap interpolation]
+    G --> H[Extend tracks\nSAD visual tracking + velocity extrapolation]
+    H --> I[Obscure frames\nsharp — feathered colour fill]
+    I --> J[Compose output video\nffmpeg]
+    G --> K([JSON output — stdout])
+    J --> K
 ```
 
-**Linux (Ubuntu/Debian):**
-```bash
-./scripts/install-linux.sh
-# or manually:
-sudo apt-get install docker.io && sudo systemctl start docker
-docker build -t number-jam-alpr docker/
-```
+| Step | What it does |
+|---|---|
+| **Extract frames** | Pulls every frame from the video as a JPEG using ffmpeg |
+| **Pre-process** | Sharpens and normalises each frame; upscales if the source is narrower than 1280 px |
+| **Detect plates** | Sends each frame to OpenALPR (running in Docker) and collects bounding-box polygons and plate text |
+| **Character scan** | *(Obscuring only)* Runs tesseract.js on an expanded region around each ANPR detection to find characters that OpenALPR clipped from the polygon edges; widens the polygon to cover them |
+| **Build tracks** | Links detections across frames using IOU matching; interpolates positions across short gaps |
+| **Extend tracks** | Extends each track beyond the ANPR detection window using SAD[^sad] template matching (backward and forward), then velocity extrapolation for `--extend-detection` ms further |
+| **Obscure frames** | Fills each detection polygon with a feathered colour sampled from the plate background |
+| **Compose video** | Re-encodes the obscured frames into an output video with original audio |
+| **JSON output** | Writes a structured result document to stdout |
 
-### Install the alternative ANPR engine (fast-alpr, Python)
-
-```bash
-pip3 install fast-alpr
-```
-
----
-
-## Installation
-
-```bash
-npm install
-npm run build
-```
+[^sad]: **Sum of Absolute Differences.** This is a comparison between a block of pixels in the 'current' frame and a candidate block in a candidate frame. Using multiple candidate positions, the lowest SAD is the best match for the original block - so likely indicating the motion of the block.
 
 ---
 
 ## Usage
+
+### Setup
+
+**macOS:**
+```bash
+brew install --cask docker-desktop
+docker build -t number-jam-alpr docker/
+npm install
+npm run build
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get install docker.io && sudo systemctl start docker
+docker build -t number-jam-alpr docker/
+npm install
+npm run build
+```
+
+### Invocations
 
 ```bash
 # Basic detection — print JSON to stdout
@@ -60,10 +68,13 @@ npm run build
 ./run-mac.sh -i video.mp4 -r gb,de,fr
 
 # Detect and obscure plates in an output video
-./run-mac.sh -i video.mp4 -o output.mp4 --obscure-number-plates
+./run-mac.sh -i video.mp4 -o output.mp4
 
-# Extend obscuring 3 seconds before/after each track
-./run-mac.sh -i video.mp4 -o output.mp4 --obscure-number-plates --extend-seconds 3
+# Extend obscuring 5 seconds before/after each track
+./run-mac.sh -i video.mp4 -o output.mp4 -x 5000
+
+# Include full frame-by-frame tracking history in JSON output
+./run-mac.sh -i video.mp4 --verbose
 
 # Pipe JSON output to a file
 ./run-mac.sh -i video.mp4 > results.json
@@ -76,16 +87,21 @@ On Linux, replace `./run-mac.sh` with `./run-linux.sh`.
 | Flag | Description |
 |---|---|
 | `-i`, `--input <path>` | Path to the input video file **(required)** |
-| `-o`, `--output <path>` | Path for the obscured output video *(required with `-p`)* |
-| `-p`, `--obscure-number-plates` | Obscure detected plates in an output video |
+| `-o`, `--obscure <path>` | Obscure detected plates and write the output video to this path |
 | `-r`, `--regions <codes>` | Comma-separated region codes (e.g. `gb,de,us`). Defaults to all. |
-| `--extend-seconds <n>` | Extend obscuring N seconds before/after each track (default: 2) |
-| `--min-confidence <n>` | Drop detections below this OCR confidence threshold (0–100) |
-| `--include-tracking` | Include full frame-by-frame polygon history in JSON output |
+| `-v`, `--verbose` | Include full frame-by-frame polygon history in JSON output |
+| `-c`, `--confidence <n>` | Drop detections below this OCR confidence threshold (0–100) |
+| `-x`, `--extend-detection <ms>` | Extend obscuring this many milliseconds before/after each track (default: 2000) |
+| `-m`, `--min-fraction <n>` | Minimum visible plate fraction (0–1) required to obscure a frame (default: 0.01) |
+| `-h`, `--help` | Show all options and list all accepted region codes |
 
 ### Region codes
 
-Region codes follow ISO 3166-1 alpha-2 (e.g. `gb`, `de`, `fr`, `us`, `au`). Run `npm test` to see the full list — every entry in `src/regions/plate-formats.ts` is exercised by the test suite.
+Region codes follow ISO 3166-1 alpha-2 (e.g. `gb`, `de`, `fr`, `us`, `au`). Run the following to see every accepted code:
+
+```bash
+./run-mac.sh --help
+```
 
 ---
 
@@ -98,25 +114,39 @@ The tool prints a single JSON document to stdout:
   "request": {
     "path": "video.mp4",       // input path as given
     "regions": ["gb", "de"],   // region filter ("*" = all)
-    "obscure": false
+    "obscure": false,
+    "verbose": false
   },
   "summary": [
-    { "plate": "AB12CDE", "region": "gb" },
-    { "plate": "",         "region": null }  // unreadable partial plate
+    {
+      "plate": "AB12CDE",
+      "region": "gb",
+      "trackedFrom": 1040,    // ms from video start
+      "trackedUntil": 8320    // ms from video start
+    },
+    {
+      "plate": "",            // unreadable partial plate
+      "region": null,
+      "trackedFrom": 2500,
+      "trackedUntil": 2500
+    }
   ],
-  "tracking": [
+  "tracking": [               // populated only when --verbose is set
     {
       "plate": "AB12CDE",
       "history": [
         {
-          "timestamp": 1.04,                // seconds from video start
+          "timestamp": 1040,  // ms from video start
           "polygon": [[100,200],[200,200],[200,250],[100,250]]
         }
         // ... one entry per frame the plate was visible
         // gaps between actual detections are interpolated
       ]
     }
-  ]
+  ],
+  "videoDuration": 11000,     // ms, rounded to nearest integer
+  "processingDuration": 4521, // wall-clock ms
+  "output": "/abs/path/out.mp4" // null when --obscure was not set
 }
 ```
 
@@ -127,7 +157,7 @@ Progress information (frame count, detection counts, etc.) is written to **stder
 ## Running tests
 
 ```bash
-# Unit tests (no Docker or Python required)
+# Unit tests (no Docker required)
 npm test
 
 # Unit tests with coverage report
@@ -135,29 +165,43 @@ npm run test:coverage
 
 # Integration tests (requires Docker + fixtures)
 npm run download-fixtures
-npm run test:integration
+RUN_INTEGRATION_TESTS=1 npm run test:integration
 ```
 
 Unit test files:
-- **plate-formats.test.ts** — every regex in the plate-formats database is exercised with at least one passing and one failing example
-- **tracker.test.ts** — IOU tracker logic (assignment, gap-filling, track closure)
-- **detection-engines.test.ts** — JSON parser fixtures for docker-alpr output format
-- **motion.test.ts** — centroid, velocity, and polygon-shift helpers
-- **visual-tracker.test.ts** — SAD template-matching tracker on synthetic JPEG frames
-- **obscurer.test.ts** — plate obscuring geometry helpers and end-to-end
-- **infer-region.test.ts** — region inference utility (plate text → ISO region code)
 
-Integration tests (`tests/integration/`) require `RUN_INTEGRATION_TESTS=1` and use public-domain video and image fixtures. See `tests/fixtures/ATTRIBUTION.md` for licence details.
+| File | What it tests |
+|---|---|
+| `tests/plate-formats.test.ts` | Every regex in the plate-formats database — one passing + one failing example each |
+| `tests/tracker.test.ts` | IOU tracker logic (assignment, gap-filling, track closure) |
+| `tests/motion.test.ts` | Centroid, velocity, and polygon-shift helpers |
+| `tests/phases.test.ts` | `velocityFromBackCoverage` helper |
+| `tests/detection-engines.test.ts` | JSON parser fixtures for docker-alpr output format |
+| `tests/polygon-merge.test.ts` | `mergeOverlappingPolygons` union-find algorithm |
+| `tests/visual-tracker.test.ts` | SAD template-matching tracker on synthetic JPEG frames |
+| `tests/character-scan.test.ts` | Tesseract character scan on synthetic JPEG frames |
+| `tests/obscurer.test.ts` | Plate obscuring geometry helpers and end-to-end |
+| `tests/infer-region.test.ts` | Region inference utility (plate text → ISO region code) |
+| `tests/formatter.test.ts` | JSON output document builder |
+| `tests/cli.test.ts` | `parseRegions` and `warnUnknownRegions` helpers |
+
+Integration tests (`tests/integration/`) require `RUN_INTEGRATION_TESTS=1`. The plate-coverage test additionally requires the source video at `temp/VID_20260609_122553.mp4` (not a public fixture). See `tests/fixtures/ATTRIBUTION.md` for licence details.
 
 ---
 
-## Project structure
+## Dev notes
+
+### Project structure
 
 ```
 number-jam/
 ├── src/
 │   ├── cli.ts                         Entry point; orchestrates the full pipeline
 │   ├── types.ts                       Shared TypeScript interfaces
+│   ├── cli/
+│   │   ├── phases.ts                  Named async functions for each pipeline phase
+│   │   ├── character-scan.ts          Tesseract character scan to widen ANPR polygons
+│   │   └── progress.ts                Progress bar helpers
 │   ├── video/
 │   │   ├── extractor.ts               Extract frames from video via ffmpeg
 │   │   └── composer.ts                Re-encode frames into output video
@@ -184,27 +228,31 @@ number-jam/
 │   ├── install-mac.sh                 macOS prerequisite installer
 │   ├── install-linux.sh               Linux prerequisite installer
 │   ├── download-fixtures.ts           Downloads test fixture files (idempotent)
-│   └── generate-formats.ts            Wikipedia scraper (refreshes plate-formats.ts)
+│   └── generate-formats.ts           Wikipedia scraper (refreshes plate-formats.ts)
 ├── tests/
 │   ├── plate-formats.test.ts
 │   ├── tracker.test.ts
 │   ├── motion.test.ts
+│   ├── phases.test.ts
 │   ├── detection-engines.test.ts
+│   ├── polygon-merge.test.ts
 │   ├── visual-tracker.test.ts
+│   ├── character-scan.test.ts
 │   ├── obscurer.test.ts
 │   ├── infer-region.test.ts
+│   ├── formatter.test.ts
+│   ├── cli.test.ts
 │   ├── fixtures/
 │   │   └── ATTRIBUTION.md             Licence information for test fixtures
 │   └── integration/
 │       ├── extractor.test.ts
-│       └── docker-alpr.test.ts
+│       ├── docker-alpr.test.ts
+│       └── plate-coverage.test.ts
 ├── run-mac.sh                         Launch script for macOS
 └── run-linux.sh                       Launch script for Linux
 ```
 
----
-
-## Regenerating the plate-formats database
+### Regenerating the plate-formats database
 
 ```bash
 npm run generate-formats
