@@ -4,6 +4,19 @@ Detects, tracks, and optionally obscures vehicle number plates in video clips.
 
 ## Overview
 
+At the core of this project is [OpenALPR](https://github.com/openalpr/openalpr), which is used for numberplate detection.
+
+> [!WARNING]
+> OpenALPR is not maintained.
+
+This project containerises OpenALPR, and supplements its findings with additional steps:
+
+- Plates are initially found with OpenALPR
+- Tesseract is used to identify neary 'missed' characters and expand the bounding box polygon
+- Short gaps between detections are interpolated
+- SAD[^sad] is used to track motion of plates between, before, and after detections
+- Falls back to velocity extrapolation
+
 ```mermaid
 flowchart LR
     A([Input video]) --> B[Extract frames\nffmpeg]
@@ -27,7 +40,7 @@ flowchart LR
 | **Detect plates**  | Sends each frame to OpenALPR (running in Docker) and collects bounding-box polygons and plate text                                                                                      |
 | **Character scan** | _(Obscuring only)_ Runs tesseract.js on an expanded region around each ANPR detection to find characters that OpenALPR clipped from the polygon edges; widens the polygon to cover them |
 | **Build tracks**   | Links detections across frames using IOU matching; interpolates positions across short gaps                                                                                             |
-| **Extend tracks**  | Extends each track beyond the ANPR detection window using SAD[^sad] template matching (backward and forward), then velocity extrapolation for `--extend-detection` ms further           |
+| **Extend tracks**  | Extends each track beyond the ANPR detection window using SAD template matching (backward and forward), then velocity extrapolation for `--extend-detection` ms further                 |
 | **Obscure frames** | Fills each detection polygon with a feathered colour sampled from the plate background                                                                                                  |
 | **Compose video**  | Re-encodes the obscured frames into an output video with original audio                                                                                                                 |
 | **JSON output**    | Writes a structured result document to stdout                                                                                                                                           |
@@ -40,7 +53,7 @@ This tool can run under Linux or Mac OS. In both cases, Docker must be available
 
 ### Setup
 
-**macOS:**
+#### Mac OS
 
 ```bash
 brew install --cask docker-desktop
@@ -49,7 +62,7 @@ npm install
 npm run build
 ```
 
-**Linux (Ubuntu/Debian):**
+#### Linux (Ubuntu/Debian)
 
 ```bash
 sudo apt-get install docker.io && sudo systemctl start docker
@@ -182,9 +195,8 @@ npm run download-fixtures
 
 For each video, create a matching metadata file that tells the test what to expect:
 
-**`tests/fixtures/videos/my-clip.mp4`** — the video clip (pre-trimmed to the window of interest)
-
-**`tests/fixtures/videos/my-clip.metadata.json`** — describes what should be found and obscured:
+1. **`tests/fixtures/videos/my-clip.mp4`** — the video clip (trim it to the window of interest)
+2. **`tests/fixtures/videos/my-clip.metadata.json`** — describes what should be found and obscured...
 
 ```jsonc
 {
