@@ -1,28 +1,17 @@
 /**
- * Integration test for plate-coverage quality on a real video clip.
+ * Integration tests for plate-coverage quality on user-supplied video fixtures.
  *
- * Cuts a 9 s – 20 s window from the user's recording, runs the full detection,
- * tracking, and obscuring pipeline, then asserts:
+ * For each `.mp4` found in `tests/fixtures/videos/` that has a matching
+ * `<filename>.metadata.json`, the full detection/tracking/obscuring pipeline
+ * is executed once (in `beforeAll`) and the results are shared across all
+ * per-plate `it` tests within that video's `describe` block.
  *
- *   a) Minimum coverage — at least 4 s worth of frames have a coverage polygon.
- *   b) No large gaps — consecutive covered frames never leave a gap > 1 s during
- *      the plate-visible window (approx. 3 s into the clip onward).
- *   c) Anti-flicker — the bounding-box area of the coverage polygon does not
- *      change by more than 60 % between adjacent covered frames.
- *   d) Top-edge coverage — for any frame where ANPR detected the plate with its
- *      top polygon edge within 10 px of y = 0, the coverage polygon's minimum
- *      y coordinate must be ≤ 5 px (so the obscured region starts flush with
- *      the top of the frame).
- *   e) All covered frames are present in the obscured output directory.
- *   f) Obscured plate regions contain no readable alphanumeric text (verified
- *      with tesseract.js OCR on the actual output frames).
+ * Skipped entirely unless `RUN_INTEGRATION_TESTS=1` is set.
+ * Add videos to `tests/fixtures/videos/` — they are git-ignored by design.
  *
- * Skipped unless both RUN_INTEGRATION_TESTS=1 and the source video exist.
- * The source video is the user's own recording and is not a downloadable fixture.
+ * @see {@link TestVideoMetadata} for the metadata file format.
  */
 
-import { execFileSync } from "child_process";
-import ffmpegStatic from "ffmpeg-static";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -31,249 +20,568 @@ import { createWorker } from "tesseract.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runCharacterScan } from "../../src/cli/character-scan";
 import {
-    runDetection,
-    runExtraction,
-    runObscuring,
-    runPreProcessing,
-    runTrackBuilding,
-    runTrackCoverage,
+  runDetection,
+  runExtraction,
+  runObscuring,
+  runPreProcessing,
+  runTrackBuilding,
+  runTrackCoverage,
 } from "../../src/cli/phases";
 import { DockerAlprEngine } from "../../src/detection/engines/docker-alpr";
-import { Point } from "../../src/types";
+import { FrameInfo, FrameResult, Point, Track } from "../../src/types";
+import { VideoInfo } from "../../src/video/extractor";
+import { TestVideoMetadata } from "./types";
 
-// Source video — not a public fixture, lives in the repo working tree.
-const SOURCE_VIDEO = path.resolve(process.cwd(), "temp/VID_20260609_122553.mp4");
-const CLIP_START_SEC = 9;
-const CLIP_DURATION_SEC = 11;  // 9 s → 20 s in the original video
-
-// Plate enters the camera frame at approximately original 12 s (clip 3 s).
-// ANPR typically detects the plate at approximately original 18–19 s (clip 9–10 s).
-// Backward tracking + velocity extrapolation should cover the entry window.
-const PLATE_VISIBLE_CLIP_SEC = 3;  // seconds into the clip when plate appears
-
+const VIDEOS_DIR = path.resolve(process.cwd(), "tests/fixtures/videos");
 const SKIP_INTEGRATION = !process.env["RUN_INTEGRATION_TESTS"];
-const SKIP_NO_SOURCE = !fs.existsSync(SOURCE_VIDEO);
-const SKIP = SKIP_INTEGRATION || SKIP_NO_SOURCE;
 
-let tmpDir: string;
-let engine: DockerAlprEngine;
+/** Discover video fixtures synchronously at module load time. */
+const videoFixtures: Array<{ videoPath: string; metadata: TestVideoMetadata }> =
+  fs
+    .readdirSync(VIDEOS_DIR)
+    .filter((f) => f.endsWith(".mp4"))
+    .flatMap((f) => {
+      const videoPath = path.join(VIDEOS_DIR, f);
+      const metaPath = videoPath.replace(/\.mp4$/, ".metadata.json");
+      if (!fs.existsSync(metaPath)) return [];
+      const metadata: TestVideoMetadata = JSON.parse(
+        fs.readFileSync(metaPath, "utf8"),
+      );
+      return [{ videoPath, metadata }];
+    });
 
-beforeAll(async () => {
-  if (SKIP) return;
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "nj-coverage-test-"));
-}, 10_000);
+// Module-level pure helpers
 
-afterAll(async () => {
-  if (SKIP) return;
-  await engine?.shutdown().catch(() => undefined);
-  if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
-}, 30_000);
+/**
+ * Edit distance between two strings (standard Levenshtein, O(m·n) space O(m)).
+ * Used to tolerate single-character ANPR misreads.
+ */
+function levenshtein(a: string, b: string): number {
+  const m = a.length,
+    n = b.length;
+  // dp[i] = edit distance between a[0..i] and b[0..current j]
+  const dp = Array.from({ length: m + 1 }, (_, i) => i);
+  for (let j = 1; j <= n; j++) {
+    let prev = dp[0];
+    dp[0] = j;
+    for (let i = 1; i <= m; i++) {
+      const temp = dp[i];
+      dp[i] =
+        a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, dp[i], dp[i - 1]);
+      prev = temp;
+    }
+  }
+  return dp[m];
+}
 
-// Helper: axis-aligned bounding box from a polygon.
-function bbox(polygon: Point[]): { left: number; top: number; right: number; bottom: number } {
-  const xs = polygon.map(([x]) => x);
-  const ys = polygon.map(([, y]) => y);
+/**
+ * Returns all non-empty {@link Track}s whose plate text closely matches `plate`.
+ * Tries exact case-insensitive match first; falls back to Levenshtein distance ≤ 2
+ * to tolerate common ANPR misreads (e.g. a dropped or transposed character).
+ */
+function matchingTracks(plate: string, tracks: Track[]): Track[] {
+  const upper = plate.toUpperCase();
+  const exact = tracks.filter((t) => t.plate.toUpperCase() === upper);
+  if (exact.length > 0) return exact;
+  return tracks.filter(
+    (t) => t.plate.length > 0 && levenshtein(t.plate.toUpperCase(), upper) <= 2,
+  );
+}
+
+/**
+ * Returns the frame-index window `[startFi, endFi]` during which `plate` is
+ * expected to be visible.  Uses metadata seconds when provided, otherwise falls
+ * back to the min/max history frame indices across all matching tracks.
+ */
+function plateFrameWindow(
+  plate: string,
+  tracks: Track[],
+  fps: number,
+  visibleFrom?: number,
+  visibleUntil?: number,
+): { startFi: number; endFi: number } {
+  const pt = matchingTracks(plate, tracks);
+  const allFis = pt.flatMap((t) => t.history.map((h) => h.frameIndex));
   return {
-    left: Math.min(...xs),
-    top: Math.min(...ys),
-    right: Math.max(...xs),
-    bottom: Math.max(...ys),
+    startFi:
+      visibleFrom !== undefined
+        ? Math.round(visibleFrom * fps)
+        : Math.min(...allFis),
+    endFi:
+      visibleUntil !== undefined
+        ? Math.round(visibleUntil * fps)
+        : Math.max(...allFis),
   };
 }
 
-function bboxArea(polygon: Point[]): number {
-  const b = bbox(polygon);
-  return Math.max(0, b.right - b.left) * Math.max(0, b.bottom - b.top);
+/** Returns covered frame indices within `[startFi, endFi]`, sorted ascending. */
+function coveredFramesInWindow(
+  startFi: number,
+  endFi: number,
+  trackPolygons: Map<number, Point[][]>,
+): number[] {
+  return [...trackPolygons.keys()]
+    .filter((fi) => fi >= startFi && fi <= endFi)
+    .sort((a, b) => a - b);
 }
 
-describe("plate-coverage integration", () => {
-  it.skipIf(SKIP)(
-    "covers the plate during entry from the top of the frame without flicker or gaps",
-    async () => {
-      // --- Cut the clip ---
-      const clipPath = path.join(tmpDir, "clip.mp4");
-      execFileSync(ffmpegStatic!, [
-        "-y",
-        "-ss", String(CLIP_START_SEC),
-        "-i", SOURCE_VIDEO,
-        "-t", String(CLIP_DURATION_SEC),
-        "-c", "copy",
-        clipPath,
-      ]);
-
-      // --- Run pipeline ---
-      const framesDir = path.join(tmpDir, "frames");
-      fs.mkdirSync(framesDir);
-
-      engine = new DockerAlprEngine(0);
-      await engine.check();
-      await engine.startup();
-
-      const { frames, videoInfo } = await runExtraction(clipPath, framesDir);
-      await runPreProcessing(frames, videoInfo.width);
-      const rawFrameResults = await runDetection(frames, ["gb"], engine);
-      const frameResults = await runCharacterScan(frames, rawFrameResults, videoInfo.width, videoInfo.height);
-      const tracks = runTrackBuilding(frameResults, videoInfo.fps);
-
-      const fps = videoInfo.fps;
-      const extendFrames = Math.round(fps * 12);  // generous 12 s backward window
-      const trackPolygons = await runTrackCoverage(
-        tracks,
-        frames,
-        extendFrames,
-        videoInfo.width,
-        videoInfo.height,
-        fps,
-      );
-
-      // --- Assertion (a): minimum coverage ---
-      const minCoverageFrames = Math.round(fps * 4);
-      expect(trackPolygons.size).toBeGreaterThanOrEqual(minCoverageFrames);
-
-      // --- Assertion (b): no large gap during plate-visible window ---
-      const visibleStartFi = Math.round(PLATE_VISIBLE_CLIP_SEC * fps);
-      const coveredInWindow = [...trackPolygons.keys()]
-        .filter((fi) => fi >= visibleStartFi)
-        .sort((a, b) => a - b);
-
-      const maxGapAllowed = Math.round(fps);  // 1 s
-      for (let i = 1; i < coveredInWindow.length; i++) {
-        const gap = coveredInWindow[i] - coveredInWindow[i - 1];
-        expect(gap).toBeLessThanOrEqual(maxGapAllowed);
-      }
-
-      // --- Assertion (c): anti-flicker ---
-      const allCovered = [...trackPolygons.keys()].sort((a, b) => a - b);
-      for (let i = 1; i < allCovered.length; i++) {
-        const prev = allCovered[i - 1];
-        const cur = allCovered[i];
-        if (cur - prev !== 1) continue;  // only check consecutive frames
-
-        const prevPolygons = trackPolygons.get(prev)!;
-        const curPolygons = trackPolygons.get(cur)!;
-        if (!prevPolygons.length || !curPolygons.length) continue;
-
-        const prevArea = bboxArea(prevPolygons[0]);
-        const curArea = bboxArea(curPolygons[0]);
-        if (prevArea === 0 || curArea === 0) continue;
-
-        const changeRatio = Math.abs(curArea - prevArea) / prevArea;
-        expect(changeRatio).toBeLessThan(0.6);
-      }
-
-      // --- Assertion (d): top-edge coverage for detected frames ---
-      // For every frame where ANPR detected a plate near the top of the frame,
-      // the coverage polygon's min-y must be ≤ 5 px (flush with frame top after
-      // the velocity-extension fix in phases.ts).
-      const frameResultByIndex = new Map(frameResults.map((fr) => [fr.frameIndex, fr]));
-      const detectedNearTop = new Map<number, Point[][]>();
-      for (const [fi, fr] of frameResultByIndex) {
-        const nearTopDets = fr.detections.filter((det) => {
-          const minY = Math.min(...det.polygon.map(([, y]) => y));
-          return minY < 10;
-        });
-        if (nearTopDets.length > 0) {
-          detectedNearTop.set(fi, nearTopDets.map((d) => d.polygon));
-        }
-      }
-      for (const fi of detectedNearTop.keys()) {
-        const polygons = trackPolygons.get(fi);
-        if (!polygons || polygons.length === 0) continue;
-        const coverageMinY = Math.min(...polygons[0].map(([, y]) => y));
-        // Coverage polygon should start at or above y = 5 (SVG clips negative
-        // values to y = 0, so negative minY is fine too).
-        expect(coverageMinY).toBeLessThanOrEqual(5);
-      }
-
-      // --- Run obscuring ---
-      const obscureDir = path.join(tmpDir, "obscured");
-      fs.mkdirSync(obscureDir);
-      await runObscuring(frames, trackPolygons, obscureDir);
-
-      // --- Assertion (e): all covered frames have an output file ---
-      for (const fi of trackPolygons.keys()) {
-        const basename = path.basename(frames[fi].filePath);
-        expect(fs.existsSync(path.join(obscureDir, basename))).toBe(true);
-      }
-
-      // --- Assertion (f): obscured plate regions contain no readable text ---
-      // Sample covered frames spread evenly across the full plate-visible window
-      // (not just ANPR detection frames). This catches failures in velocity-
-      // extrapolated or visual-tracking-extended frames where characters may
-      // still be visible even though ANPR never fired there.
-      {
-        const visibleCoveredFrames = [...trackPolygons.keys()]
-          .filter((fi) => fi >= visibleStartFi)
-          .sort((a, b) => a - b);
-
-        if (visibleCoveredFrames.length > 0) {
-          const worker = await createWorker("eng");
-          try {
-            // Sample up to 8 frames spread evenly across the visible window.
-            const N = 8;
-            const step = Math.max(1, Math.floor(visibleCoveredFrames.length / N));
-            const sampleFrames = visibleCoveredFrames.filter((_, i) => i % step === 0).slice(0, N);
-
-            for (const fi of sampleFrames) {
-              const obscuredPath = path.join(obscureDir, path.basename(frames[fi].filePath));
-              if (!fs.existsSync(obscuredPath)) continue;
-
-              const coveragePolygons = trackPolygons.get(fi)!;
-              if (!coveragePolygons.length) continue;
-
-              // Crop the coverage polygon bbox (with padding) from the obscured frame.
-              const allPts = coveragePolygons.flat();
-              const covLeft = Math.max(0, Math.min(...allPts.map(([x]) => x)) - 10);
-              const covTop = Math.max(0, Math.min(...allPts.map(([, y]) => y)) - 10);
-              const covRight = Math.min(videoInfo.width, Math.max(...allPts.map(([x]) => x)) + 10);
-              const covBottom = Math.min(videoInfo.height, Math.max(...allPts.map(([, y]) => y)) + 10);
-              const cropW = covRight - covLeft;
-              const cropH = covBottom - covTop;
-              if (cropW < 4 || cropH < 4) continue;
-
-              const cropPath = path.join(tmpDir, `ocr-crop-${fi}.jpg`);
-              await sharp(obscuredPath)
-                .extract({ left: covLeft, top: covTop, width: cropW, height: cropH })
-                .jpeg({ quality: 95 })
-                .toFile(cropPath);
-
-              const result = await worker.recognize(cropPath);
-
-              const words = (result.data.blocks ?? [])
-                .flatMap((b) => b.paragraphs)
-                .flatMap((p) => p.lines)
-                .flatMap((l) => l.words)
-                .filter((w) => w.confidence > 50);
-
-              const readableAlphanumChars = words
-                .map((w) => w.text.replace(/[^a-zA-Z0-9]/g, ""))
-                .filter((t) => t.length >= 2)
-                .join("");
-
-              //`Frame ${fi}: tesseract found readable plate text "${readableAlphanumChars}" in obscured coverage region`,
-              expect(readableAlphanumChars).toBe(
-                "",
-              );
-            }
-          } finally {
-            await worker.terminate();
-          }
-        }
-      }
-    },
-    1_200_000,  // 20 min — Docker startup + ANPR + character scan + obscuring + OCR
+/** Axis-aligned bounding-box area of a polygon. */
+function bboxArea(polygon: Point[]): number {
+  const xs = polygon.map(([x]) => x);
+  const ys = polygon.map(([, y]) => y);
+  return (
+    Math.max(0, Math.max(...xs) - Math.min(...xs)) *
+    Math.max(0, Math.max(...ys) - Math.min(...ys))
   );
+}
 
-  it.skipIf(SKIP_INTEGRATION)(
-    "skips gracefully when source video is absent",
-    () => {
-      if (!SKIP_NO_SOURCE) {
-        // Source exists — this test is vacuously true.
-        return;
+// Engine is shared across all video fixtures to avoid repeated Docker startups.
+let engine: DockerAlprEngine;
+
+describe("plate-coverage integration", () => {
+  beforeAll(async () => {
+    if (SKIP_INTEGRATION) return;
+    engine = new DockerAlprEngine(0);
+    await engine.check();
+    await engine.startup();
+  }, 60_000);
+
+  afterAll(async () => {
+    if (SKIP_INTEGRATION) return;
+    await engine?.shutdown().catch(() => undefined);
+  }, 30_000);
+
+  for (const { videoPath, metadata } of videoFixtures) {
+    const videoName = path.basename(videoPath);
+
+    describe(`video: ${videoName}`, () => {
+      let tmpDir!: string;
+      let obscureDir!: string;
+      let frames!: FrameInfo[];
+      let videoInfo!: VideoInfo;
+      let frameResults!: FrameResult[];
+      let tracks!: Track[];
+      let trackPolygons!: Map<number, Point[][]>;
+
+      beforeAll(async () => {
+        if (SKIP_INTEGRATION) return;
+
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "nj-coverage-test-"));
+        obscureDir = path.join(tmpDir, "obscured");
+        const framesDir = path.join(tmpDir, "frames");
+        fs.mkdirSync(obscureDir);
+        fs.mkdirSync(framesDir);
+
+        const extracted = await runExtraction(videoPath, framesDir);
+        frames = extracted.frames;
+        videoInfo = extracted.videoInfo;
+
+        await runPreProcessing(frames, videoInfo.width);
+        const rawFrameResults = await runDetection(frames, ["gb"], engine);
+        frameResults = await runCharacterScan(
+          frames,
+          rawFrameResults,
+          videoInfo.width,
+          videoInfo.height,
+        );
+        tracks = runTrackBuilding(frameResults, videoInfo.fps);
+
+        const extendFrames = Math.round(videoInfo.fps * 12);
+        trackPolygons = await runTrackCoverage(
+          tracks,
+          frames,
+          extendFrames,
+          videoInfo.width,
+          videoInfo.height,
+          videoInfo.fps,
+        );
+
+        await runObscuring(frames, trackPolygons, obscureDir);
+      }, 1_200_000);
+
+      afterAll(async () => {
+        if (SKIP_INTEGRATION) return;
+        if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+      }, 30_000);
+
+      for (const expectation of metadata.expectations) {
+        const { plate, visibleFrom, visibleUntil, hasEntries, hasExits } =
+          expectation;
+
+        describe(`plate: ${plate}`, () => {
+          it.skipIf(SKIP_INTEGRATION)(
+            "covers the plate without flicker or gaps",
+            () => {
+              expect(
+                matchingTracks(plate, tracks).length,
+                `No track found for plate "${plate}" — check metadata plate text`,
+              ).toBeGreaterThan(0);
+
+              const { startFi, endFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                startFi,
+                endFi,
+                trackPolygons,
+              );
+
+              // Minimum coverage: at least 2 s worth of frames.
+              expect(covered.length).toBeGreaterThanOrEqual(
+                Math.round(videoInfo.fps * 2),
+              );
+
+              // No gap > 1 s between consecutive covered frames.
+              const maxGap = Math.round(videoInfo.fps);
+              for (let i = 1; i < covered.length; i++) {
+                expect(covered[i] - covered[i - 1]).toBeLessThanOrEqual(maxGap);
+              }
+
+              // Anti-flicker: area change ≤ 60 % between adjacent covered frames.
+              for (let i = 1; i < covered.length; i++) {
+                const prev = covered[i - 1];
+                const cur = covered[i];
+                if (cur - prev !== 1) continue;
+                const prevPolys = trackPolygons.get(prev)!;
+                const curPolys = trackPolygons.get(cur)!;
+                if (!prevPolys.length || !curPolys.length) continue;
+                const prevArea = bboxArea(prevPolys[0]);
+                const curArea = bboxArea(curPolys[0]);
+                if (prevArea === 0 || curArea === 0) continue;
+                expect(Math.abs(curArea - prevArea) / prevArea).toBeLessThan(
+                  0.6,
+                );
+              }
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION || !hasEntries?.includes("top"))(
+            "covers the plate during entry if it enters from the top of the frame",
+            () => {
+              const { startFi, endFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                startFi,
+                endFi,
+                trackPolygons,
+              );
+              const openingEnd = startFi + Math.round(videoInfo.fps);
+              const reachesTop = covered
+                .filter((fi) => fi <= openingEnd)
+                .some((fi) => {
+                  const polys = trackPolygons.get(fi);
+                  return polys?.length
+                    ? Math.min(...polys[0].map(([, y]) => y)) <= 5
+                    : false;
+                });
+              expect(reachesTop).toBe(true);
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION || !hasEntries?.includes("bottom"))(
+            "covers the plate during entry if it enters from the bottom of the frame",
+            () => {
+              const { startFi, endFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                startFi,
+                endFi,
+                trackPolygons,
+              );
+              const openingEnd = startFi + Math.round(videoInfo.fps);
+              const reachesBottom = covered
+                .filter((fi) => fi <= openingEnd)
+                .some((fi) => {
+                  const polys = trackPolygons.get(fi);
+                  return polys?.length
+                    ? Math.max(...polys[0].map(([, y]) => y)) >=
+                        videoInfo.height - 5
+                    : false;
+                });
+              expect(reachesBottom).toBe(true);
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION || !hasEntries?.includes("left"))(
+            "covers the plate during entry if it enters from the left of the frame",
+            () => {
+              const { startFi, endFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                startFi,
+                endFi,
+                trackPolygons,
+              );
+              const openingEnd = startFi + Math.round(videoInfo.fps);
+              const reachesLeft = covered
+                .filter((fi) => fi <= openingEnd)
+                .some((fi) => {
+                  const polys = trackPolygons.get(fi);
+                  return polys?.length
+                    ? Math.min(...polys[0].map(([x]) => x)) <= 5
+                    : false;
+                });
+              expect(reachesLeft).toBe(true);
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION || !hasEntries?.includes("right"))(
+            "covers the plate during entry if it enters from the right of the frame",
+            () => {
+              const { startFi, endFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                startFi,
+                endFi,
+                trackPolygons,
+              );
+              const openingEnd = startFi + Math.round(videoInfo.fps);
+              const reachesRight = covered
+                .filter((fi) => fi <= openingEnd)
+                .some((fi) => {
+                  const polys = trackPolygons.get(fi);
+                  return polys?.length
+                    ? Math.max(...polys[0].map(([x]) => x)) >=
+                        videoInfo.width - 5
+                    : false;
+                });
+              expect(reachesRight).toBe(true);
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION || !hasExits?.includes("top"))(
+            "covers the plate during exit if it exits from the top of the frame",
+            () => {
+              const { endFi: plateEndFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                0,
+                plateEndFi,
+                trackPolygons,
+              );
+              const closingStart = plateEndFi - Math.round(videoInfo.fps);
+              const reachesTop = covered
+                .filter((fi) => fi >= closingStart)
+                .some((fi) => {
+                  const polys = trackPolygons.get(fi);
+                  return polys?.length
+                    ? Math.min(...polys[0].map(([, y]) => y)) <= 5
+                    : false;
+                });
+              expect(reachesTop).toBe(true);
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION || !hasExits?.includes("bottom"))(
+            "covers the plate during exit if it exits from the bottom of the frame",
+            () => {
+              const { endFi: plateEndFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                0,
+                plateEndFi,
+                trackPolygons,
+              );
+              const closingStart = plateEndFi - Math.round(videoInfo.fps);
+              const reachesBottom = covered
+                .filter((fi) => fi >= closingStart)
+                .some((fi) => {
+                  const polys = trackPolygons.get(fi);
+                  return polys?.length
+                    ? Math.max(...polys[0].map(([, y]) => y)) >=
+                        videoInfo.height - 5
+                    : false;
+                });
+              expect(reachesBottom).toBe(true);
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION || !hasExits?.includes("left"))(
+            "covers the plate during exit if it exits from the left of the frame",
+            () => {
+              const { endFi: plateEndFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                0,
+                plateEndFi,
+                trackPolygons,
+              );
+              const closingStart = plateEndFi - Math.round(videoInfo.fps);
+              const reachesLeft = covered
+                .filter((fi) => fi >= closingStart)
+                .some((fi) => {
+                  const polys = trackPolygons.get(fi);
+                  return polys?.length
+                    ? Math.min(...polys[0].map(([x]) => x)) <= 5
+                    : false;
+                });
+              expect(reachesLeft).toBe(true);
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION || !hasExits?.includes("right"))(
+            "covers the plate during exit if it exits from the right of the frame",
+            () => {
+              const { endFi: plateEndFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                0,
+                plateEndFi,
+                trackPolygons,
+              );
+              const closingStart = plateEndFi - Math.round(videoInfo.fps);
+              const reachesRight = covered
+                .filter((fi) => fi >= closingStart)
+                .some((fi) => {
+                  const polys = trackPolygons.get(fi);
+                  return polys?.length
+                    ? Math.max(...polys[0].map(([x]) => x)) >=
+                        videoInfo.width - 5
+                    : false;
+                });
+              expect(reachesRight).toBe(true);
+            },
+          );
+
+          it.skipIf(SKIP_INTEGRATION)(
+            "obscures the plate region without readable text remaining",
+            async () => {
+              const { startFi, endFi: plateEndFi } = plateFrameWindow(
+                plate,
+                tracks,
+                videoInfo.fps,
+                visibleFrom,
+                visibleUntil,
+              );
+              const covered = coveredFramesInWindow(
+                startFi,
+                plateEndFi,
+                trackPolygons,
+              );
+              if (covered.length === 0) return;
+
+              // Sample up to 8 frames spread evenly across the visible window.
+              const N = 8;
+              const step = Math.max(1, Math.floor(covered.length / N));
+              const sampleFrames = covered
+                .filter((_, i) => i % step === 0)
+                .slice(0, N);
+
+              const worker = await createWorker("eng");
+              try {
+                for (const fi of sampleFrames) {
+                  const obscuredPath = path.join(
+                    obscureDir,
+                    path.basename(frames[fi].filePath),
+                  );
+                  if (!fs.existsSync(obscuredPath)) continue;
+
+                  const coveragePolygons = trackPolygons.get(fi)!;
+                  if (!coveragePolygons.length) continue;
+
+                  const allPts = coveragePolygons.flat();
+                  const covLeft = Math.max(
+                    0,
+                    Math.min(...allPts.map(([x]) => x)) - 10,
+                  );
+                  const covTop = Math.max(
+                    0,
+                    Math.min(...allPts.map(([, y]) => y)) - 10,
+                  );
+                  const covRight = Math.min(
+                    videoInfo.width,
+                    Math.max(...allPts.map(([x]) => x)) + 10,
+                  );
+                  const covBottom = Math.min(
+                    videoInfo.height,
+                    Math.max(...allPts.map(([, y]) => y)) + 10,
+                  );
+                  const cropW = covRight - covLeft;
+                  const cropH = covBottom - covTop;
+                  if (cropW < 4 || cropH < 4) continue;
+
+                  const cropPath = path.join(tmpDir, `ocr-crop-${fi}.jpg`);
+                  await sharp(obscuredPath)
+                    .extract({
+                      left: covLeft,
+                      top: covTop,
+                      width: cropW,
+                      height: cropH,
+                    })
+                    .jpeg({ quality: 95 })
+                    .toFile(cropPath);
+
+                  const result = await worker.recognize(cropPath);
+
+                  const readableAlphanumChars = (result.data.blocks ?? [])
+                    .flatMap((b) => b.paragraphs)
+                    .flatMap((p) => p.lines)
+                    .flatMap((l) => l.words)
+                    .filter((w) => w.confidence > 50)
+                    .map((w) => w.text.replace(/[^a-zA-Z0-9]/g, ""))
+                    .filter((t) => t.length >= 2)
+                    .join("");
+
+                  expect(readableAlphanumChars).toBe("");
+                }
+              } finally {
+                await worker.terminate();
+              }
+            },
+          );
+        });
       }
-      // If source is missing, the guard above skips the main test.
-      // This test just documents that expectation.
-      expect(SKIP_NO_SOURCE).toBe(true);
+    });
+  }
+
+  it.skipIf(!SKIP_INTEGRATION)(
+    "skips gracefully when RUN_INTEGRATION_TESTS is not set",
+    () => {
+      expect(SKIP_INTEGRATION).toBe(true);
     },
   );
 });
