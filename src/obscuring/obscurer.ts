@@ -92,6 +92,40 @@ export function clampedBbox(
 const EDGE_BLUR_SIGMA = 3;
 
 /**
+ * When the polygon's top edge is within this many pixels of y = 0 (or the
+ * bottom/left/right frame edge), shift all vertices so the nearest edge of
+ * the polygon touches the frame boundary. This eliminates the thin wedge of
+ * visible plate caused by the ANPR detection polygon's upper-left corner
+ * sitting a few pixels below y = 0 while the upper-right corner is already
+ * at y = 0.
+ *
+ * Applied only to the SVG mask vertices — colour sampling still uses the
+ * original bounding box so the fill estimate is unaffected.
+ */
+const EDGE_SNAP_MARGIN = 20;
+
+/**
+ * Shift the polygon vertically / horizontally so that any edge that is within
+ * EDGE_SNAP_MARGIN px of a frame boundary is moved flush with that boundary.
+ * Handles top and bottom edges; left and right follow the same pattern if
+ * needed in future. Exported for unit testing.
+ */
+export function snapPolygonToEdges(polygon: Point[], frameW: number, frameH: number): Point[] {
+  const ys = polygon.map(([, y]) => y);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+
+  // Snap top: shift up when the top edge is inside the frame but within margin.
+  let dy = 0;
+  if (minY > 0 && minY < EDGE_SNAP_MARGIN) dy = -minY;
+  // Snap bottom: shift down when the bottom edge is within margin of frameH.
+  else if (maxY < frameH && maxY > frameH - EDGE_SNAP_MARGIN) dy = frameH - maxY;
+
+  if (dy === 0) return polygon;
+  return polygon.map(([x, y]) => [x, y + dy] as Point);
+}
+
+/**
  * Build a sharp OverlayOptions that fills the plate polygon with the
  * estimated background colour and soft-feathered edges.
  *
@@ -143,7 +177,10 @@ async function buildPolygonOverlay(
   const g = bgCount > 0 ? Math.round(gSum / bgCount) : 220;
   const b = bgCount > 0 ? Math.round(bSum / bgCount) : 220;
 
-  const pts = polygon.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(" ");
+  // The SVG mask uses the edge-snapped polygon so the obscured region starts
+  // flush with the frame boundary when the plate is near an edge.
+  const snapped = snapPolygonToEdges(polygon, frameW, frameH);
+  const pts = snapped.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(" ");
 
   // Greyscale alpha mask: white polygon on opaque black background so that
   // sharp renders a 3-channel (no-alpha) image. After greyscale conversion

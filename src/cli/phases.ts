@@ -113,6 +113,114 @@ function polygonVisibleFraction(polygon: Point[], w: number, h: number): number 
   return (vW * vH) / totalArea;
 }
 
+function polygonMinY(polygon: Point[]): number {
+  return Math.min(...polygon.map(([, y]) => y));
+}
+
+function polygonBbox(polygon: Point[]): { left: number; top: number; right: number; bottom: number } {
+  const xs = polygon.map(([x]) => x);
+  const ys = polygon.map(([, y]) => y);
+  return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
+}
+
+function bboxesOverlap(
+  a: { left: number; top: number; right: number; bottom: number },
+  b: { left: number; top: number; right: number; bottom: number },
+): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function unionBbox(
+  a: { left: number; top: number; right: number; bottom: number },
+  b: { left: number; top: number; right: number; bottom: number },
+): { left: number; top: number; right: number; bottom: number } {
+  return {
+    left: Math.min(a.left, b.left),
+    top: Math.min(a.top, b.top),
+    right: Math.max(a.right, b.right),
+    bottom: Math.max(a.bottom, b.bottom),
+  };
+}
+
+function bboxToPolygon(b: { left: number; top: number; right: number; bottom: number }): Point[] {
+  return [[b.left, b.top], [b.right, b.top], [b.right, b.bottom], [b.left, b.bottom]];
+}
+
+/**
+ * Merge a list of polygons into connected components of overlapping bounding
+ * boxes. Returns one rectangular polygon per connected component. Non-
+ * overlapping polygons are returned unchanged. Exported for unit testing.
+ */
+export function mergeOverlappingPolygons(polygons: Point[][]): Point[][] {
+  if (polygons.length === 0) return [];
+  const bboxes = polygons.map(polygonBbox);
+  // Union-find: parent[i] = representative index for polygon i.
+  const parent = polygons.map((_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  };
+  const union = (a: number, b: number) => { parent[find(a)] = find(b); };
+
+  for (let i = 0; i < bboxes.length; i++) {
+    for (let j = i + 1; j < bboxes.length; j++) {
+      if (bboxesOverlap(bboxes[i], bboxes[j])) union(i, j);
+    }
+  }
+
+  // Merge bboxes within each component.
+  const merged = new Map<number, { left: number; top: number; right: number; bottom: number }>();
+  for (let i = 0; i < bboxes.length; i++) {
+    const root = find(i);
+    merged.set(root, merged.has(root) ? unionBbox(merged.get(root)!, bboxes[i]) : bboxes[i]);
+  }
+
+  return [...merged.values()].map(bboxToPolygon);
+}
+
+/**
+ * For each frame, compute the union of all spatially overlapping polygons
+ * within a rolling time window of ±{@link halfWindow} frames. Replaces each
+ * frame's polygon list with the merged result that is spatially connected to
+ * that frame's own polygon.
+ *
+ * This reduces flicker: the obscuring region for frame fi can only grow or
+ * stay stable across adjacent frames, never shrink abruptly.
+ */
+function mergePolygonsInWindow(
+  trackPolygons: Map<number, Point[][]>,
+  halfWindow: number,
+): void {
+  const sorted = [...trackPolygons.keys()].sort((a, b) => a - b);
+  // Precompute bboxes once; we read trackPolygons but write from a snapshot.
+  const snapshot = new Map(sorted.map((fi) => [fi, trackPolygons.get(fi)!]));
+
+  for (const fi of sorted) {
+    const ownPolygons = snapshot.get(fi)!;
+    if (!ownPolygons.length) continue;
+
+    // Collect all polygons from the time window.
+    const windowPolygons: Point[][] = [];
+    for (const wfi of sorted) {
+      if (wfi < fi - halfWindow) continue;
+      if (wfi > fi + halfWindow) break;
+      windowPolygons.push(...snapshot.get(wfi)!);
+    }
+
+    // Merge overlapping bboxes in the window.
+    const merged = mergeOverlappingPolygons(windowPolygons);
+
+    // Keep only merged groups spatially connected to this frame's polygon.
+    const ownBboxes = ownPolygons.map(polygonBbox);
+    const kept = merged.filter((mp) => {
+      const mpBbox = polygonBbox(mp);
+      return ownBboxes.some((ob) => bboxesOverlap(ob, mpBbox));
+    });
+
+    trackPolygons.set(fi, kept.length > 0 ? kept : ownPolygons);
+  }
+}
+
 /**
  * Phase 3: build multi-frame tracks from per-frame detections.
  *
@@ -138,6 +246,8 @@ export function runTrackBuilding(frameResults: FrameResult[], fps: number): Trac
  *                             where visual tracking stops.
  * @param frameW               Frame pixel width (used to filter off-screen polygons).
  * @param frameH               Frame pixel height.
+ * @param fps                  Frames per second of the source video; used to size the
+ *                             rolling-window polygon merger (default: 30).
  * @param minVisibleFraction   Polygons with less than this visible fraction are not
  *                             added to the coverage map (default: {@link MIN_VISIBLE_FRACTION}).
  */
@@ -147,6 +257,7 @@ export async function runTrackCoverage(
   extendFrames: number,
   frameW: number,
   frameH: number,
+  fps = 30,
   minVisibleFraction = MIN_VISIBLE_FRACTION,
 ): Promise<Map<number, Point[][]>> {
   const trackPolygons = new Map<number, Point[][]>();
@@ -189,17 +300,43 @@ export async function runTrackCoverage(
         }
       }
 
-      // Velocity extrapolation: applied at the outermost edges, beyond wherever
-      // visual tracking stopped (or from the detection endpoint if it found nothing).
-      const anchorBack = backCoverage.length > 0
-        ? backCoverage[backCoverage.length - 1]   // furthest frame visual tracking reached
+      // When the first detection is within 40 px of the top edge the plate is
+      // entering from above the frame. Backward SAD tracking will snap-back to
+      // y ≈ 0 and produce incorrect frozen polygons. Skip that coverage and use
+      // the first detection directly as the anchor for velocity extrapolation.
+      // 40 px mirrors SEARCH_MARGIN in visual-tracker.ts (kept local to avoid coupling).
+      const firstNearTopEdge = polygonMinY(first.polygon) < 40;
+      const anchorBack = (!firstNearTopEdge && backCoverage.length > 0)
+        ? backCoverage[backCoverage.length - 1]
         : first;
+
       const velHead = velocityFromHead(track.history);
+      const nearTopEdge = polygonMinY(anchorBack.polygon) < 40;
+      // Wider window when the plate is entering from the top — it may be
+      // visible for several seconds before ANPR detects it.
+      const backWindow = nearTopEdge ? extendFrames * 4 : extendFrames;
+
+      // Enforce a minimum upward velocity so the polygon exits the top of the
+      // frame within a reasonable number of frames. Without this, near-zero
+      // measured velocity keeps the polygon hovering at y ≈ 0, leaving a visible
+      // sliver of plate. Cap the exit window at 10 s so a large backWindow (e.g.
+      // from a generous integration-test setting) doesn't dilute the velocity.
+      const anchorHeight = Math.max(
+        1,
+        Math.max(...anchorBack.polygon.map(([, y]) => y)) - polygonMinY(anchorBack.polygon),
+      );
+      const exitWindow = Math.min(backWindow, Math.round(fps * 10));
+      const minVelY = anchorHeight / exitWindow;
+      const effectiveVelHead: [number, number] = [
+        velHead[0],
+        nearTopEdge ? Math.max(velHead[1], minVelY) : velHead[1],
+      ];
+
       const backExt: Array<{ frameIndex: number; polygon: Point[] }> = [];
-      const startFi = Math.max(0, anchorBack.frameIndex - extendFrames);
+      const startFi = Math.max(0, anchorBack.frameIndex - backWindow);
       for (let fi = startFi; fi < anchorBack.frameIndex; fi++) {
         const steps = anchorBack.frameIndex - fi;
-        const polygon = shiftPolygon(anchorBack.polygon, -velHead[0] * steps, -velHead[1] * steps);
+        const polygon = shiftPolygon(anchorBack.polygon, -effectiveVelHead[0] * steps, -effectiveVelHead[1] * steps);
         if (polygonVisibleFraction(polygon, frameW, frameH) >= minVisibleFraction) {
           backExt.push({ frameIndex: fi, polygon });
         }
@@ -220,8 +357,12 @@ export async function runTrackCoverage(
       }
 
       // Merge all coverage; history entries already present take priority.
+      // When the plate enters from the top edge, skip backCoverage (SAD snap-back
+      // positions are frozen at y ≈ 0 and would block the velocity-extrapolated
+      // positions that correctly exit the frame).
+      const backCoverageToUse = firstNearTopEdge ? [] : backCoverage;
       for (const { frameIndex, polygon } of [
-        ...backCoverage,
+        ...backCoverageToUse,
         ...fwdCoverage,
         ...gapCoverage,
         ...backExt,
@@ -234,6 +375,11 @@ export async function runTrackCoverage(
       bar.increment();
     }),
   );
+
+  // Rolling 1-second window (±0.5 s): merge overlapping polygons across time
+  // to eliminate abrupt shape changes at coverage-source boundaries.
+  const rollingHalfFrames = Math.max(1, Math.round(fps * 0.5));
+  mergePolygonsInWindow(trackPolygons, rollingHalfFrames);
 
   bar.stop();
   process.stderr.write(`${trackPolygons.size} frame(s) scheduled for obscuring\n`);

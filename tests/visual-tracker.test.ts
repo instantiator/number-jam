@@ -153,6 +153,35 @@ describe("trackBack", () => {
   });
 });
 
+describe("stall detection", () => {
+  it("does not stop prematurely for a real plate even when centroid moves slowly", async () => {
+    // A rectangle near the top of the frame that IS tracked with good SAD scores
+    // (the white rectangle is genuinely present). Even if centroid drift per frame
+    // is small, the combined stall+score check must not fire on good-quality matches.
+    // Anchor in frame 0 at the actual rectangle position; track forward.
+    const track: Track = {
+      plate: "",
+      region: null,
+      history: [
+        {
+          frameIndex: 0,
+          timestamp: 0,
+          polygon: [
+            [RECT_X0, RECT_Y],
+            [RECT_X0 + RECT_W, RECT_Y],
+            [RECT_X0 + RECT_W, RECT_Y + RECT_H],
+            [RECT_X0, RECT_Y + RECT_H],
+          ],
+        },
+      ],
+    };
+    const result = await trackForward(frames, track);
+    // The rectangle moves right across 10 frames; the tracker should follow it
+    // for most/all of those frames, not bail after STALL_WINDOW frames.
+    expect(result.length).toBeGreaterThan(5);
+  });
+});
+
 describe("minVisibleFraction parameter", () => {
   it("stops immediately when the starting polygon is below the threshold", async () => {
     // Position the rectangle 17 px inside the right edge: 17/30 px = 56.7 % visible.

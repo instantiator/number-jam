@@ -118,7 +118,7 @@ async function main(opts: {
     if (opts.obscureNumberPlates && opts.output) {
       const extendFrames = Math.max(1, Math.round((opts.extendSeconds ?? 2) * videoInfo.fps));
       const trackPolygons = await runTrackCoverage(
-        tracks, frames, extendFrames, videoInfo.width, videoInfo.height,
+        tracks, frames, extendFrames, videoInfo.width, videoInfo.height, videoInfo.fps,
       );
 
       const obscureDir = path.join(tmpDir, "obscured");

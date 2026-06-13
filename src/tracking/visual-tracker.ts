@@ -38,6 +38,25 @@ const TEMPLATE_UPDATE_INTERVAL = 5;
  * loops on malformed input; in practice the confidence threshold drops first.
  */
 const MAX_EXTENSION_FRAMES = 18_000;
+/** Frames to look back when checking whether the tracker has stalled. */
+const STALL_WINDOW = 5;
+/**
+ * If the polygon centroid has moved less than this many pixels over the last
+ * STALL_WINDOW frames AND the polygon is near a frame edge AND the average
+ * match score is above SCORE_THRESHOLD, the tracker has frozen against static
+ * background content rather than following the plate.
+ *
+ * The score condition is critical: a slowly-entering plate also produces
+ * < STALL_PX drift per window but has a low (good) score — it must not be
+ * stopped. Only a high score (poor match = background latching) triggers stop.
+ */
+const STALL_PX = 2;
+/**
+ * Average SAD score over the last STALL_WINDOW frames above which the tracker
+ * is considered to be latched onto background rather than the plate.
+ * A real plate typically scores 0.05–0.10; background content 0.13–0.20.
+ */
+const SCORE_THRESHOLD = 0.12;
 
 /**
  * Minimum fraction of the polygon's bounding box that must be visible within
@@ -157,6 +176,14 @@ function rawBbox(polygon: Point[]): { left: number; top: number; width: number; 
   };
 }
 
+// Centroid of a polygon (average of all vertices).
+function centroid(polygon: Point[]): [number, number] {
+  return [
+    polygon.reduce((s, [x]) => s + x, 0) / polygon.length,
+    polygon.reduce((s, [, y]) => s + y, 0) / polygon.length,
+  ];
+}
+
 // Fraction of the polygon's bounding box that is visible within the frame.
 // Returns 1 when fully inside, approaching 0 as the polygon moves off-screen.
 function visibleFraction(polygon: Point[], frameW: number, frameH: number): number {
@@ -272,6 +299,7 @@ async function trackSegment(
   const results: TrackedFrame[] = [];
   const step = isBack ? -1 : 1;
   let framesSinceUpdate = 0;
+  const recentScores: number[] = [];
 
   for (
     let fi = anchorFrameIndex + step;
@@ -329,6 +357,9 @@ async function trackSegment(
 
     results.push({ frameIndex: fi, polygon });
 
+    recentScores.push(score);
+    if (recentScores.length > STALL_WINDOW) recentScores.shift();
+
     // Periodically refresh the template from the current best-match region to
     // adapt to gradual changes in lighting and plate angle.
     framesSinceUpdate++;
@@ -350,6 +381,26 @@ async function trackSegment(
         }
       }
       framesSinceUpdate = 0;
+    }
+
+    // Stall detection: stop when the polygon is near a frame edge, has barely
+    // moved over the last STALL_WINDOW frames, AND the average match score is
+    // poor (background latching). The score guard is essential: a plate that
+    // enters the frame very slowly also has low centroid drift but produces a
+    // genuinely good (low) match score and must not be stopped.
+    if (results.length >= STALL_WINDOW && recentScores.length >= STALL_WINDOW) {
+      const ref = results[results.length - STALL_WINDOW];
+      const [rcx, rcy] = centroid(ref.polygon);
+      const [ccx, ccy] = centroid(polygon);
+      const drift = Math.hypot(ccx - rcx, ccy - rcy);
+      const avgScore = recentScores.reduce((a, b) => a + b, 0) / recentScores.length;
+      const b = rawBbox(polygon);
+      const nearEdge =
+        b.top < SEARCH_MARGIN ||
+        b.top + b.height > frameH - SEARCH_MARGIN ||
+        b.left < SEARCH_MARGIN ||
+        b.left + b.width > frameW - SEARCH_MARGIN;
+      if (nearEdge && drift < STALL_PX && avgScore > SCORE_THRESHOLD) break;
     }
   }
 
