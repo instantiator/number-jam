@@ -144,7 +144,7 @@ describe("plate-coverage integration", () => {
     engine = new DockerAlprEngine(0);
     await engine.check();
     await engine.startup();
-  }, 60_000);
+  }, 180_000);
 
   afterAll(async () => {
     if (SKIP_INTEGRATION) return;

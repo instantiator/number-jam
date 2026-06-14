@@ -23,7 +23,7 @@ const SKIP = !process.env["RUN_INTEGRATION_TESTS"];
 describe("docker-alpr engine integration", () => {
   let engine: DockerAlprEngine;
 
-  /** Container startup (pull + Flask init) can take up to ~60s on first run. */
+  /** Container startup (pull + Flask init) can take up to ~2 min on a cold CI runner. */
   beforeAll(async () => {
     if (SKIP) return;
 
@@ -36,7 +36,7 @@ describe("docker-alpr engine integration", () => {
     engine = new DockerAlprEngine();
     await engine.check();
     await engine.startup();
-  }, 90_000);
+  }, 180_000);
 
   afterAll(async () => {
     if (SKIP) return;

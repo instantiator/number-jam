@@ -1,5 +1,7 @@
 # number-jam
 
+[![CI](https://github.com/instantiator/number-jam/actions/workflows/main.yml/badge.svg)](https://github.com/instantiator/number-jam/actions/workflows/main.yml)
+
 Detects, tracks, and optionally obscures vehicle number plates in video clips.
 
 ## Overview
