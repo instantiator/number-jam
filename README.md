@@ -6,6 +6,12 @@
 
 Detects, tracks, and optionally obscures vehicle number plates in video clips.
 
+## Sample
+
+[![Momo's PSA](https://img.youtube.com/vi/cXMizTx0x60/0.jpg)](https://www.youtube.com/watch?v=cXMizTx0x60)
+
+Video on YouTube: https://youtu.be/cXMizTx0x60
+
 ## Overview
 
 At the core of this project is [OpenALPR](https://github.com/openalpr/openalpr), which is used for numberplate detection.
