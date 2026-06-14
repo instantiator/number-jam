@@ -2,6 +2,10 @@
   "name": "number-jam",
   "version": "0.3.0",
   "description": "Detect, track, and optionally pixelate number plates in video files.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/instantiator/number-jam"
+  },
   "main": "dist/cli.js",
   "bin": {
     "number-jam": "dist/cli.js"
