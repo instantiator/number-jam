@@ -136,7 +136,7 @@ Phase 3b extends each detected track using three layers in priority order:
 ### System prerequisites
 
 - Node.js ≥ 18
-- Docker Desktop: `brew install --cask docker-desktop` → `docker build -t number-jam-alpr docker/`
+- Docker Desktop: `brew install --cask docker-desktop` — the `number-jam-alpr` image is built automatically on first run via `DockerAlprEngine.ensureImage()` in `src/detection/engines/docker-alpr.ts`
 - `ffmpeg` and `ffprobe` are bundled via `ffmpeg-static` and `ffprobe-static` — no system install needed
 
 ### Known limitations / open TODOs
@@ -153,6 +153,7 @@ Phase 3b extends each detected track using three layers in priority order:
 | `-f`, `--fade-duration <ms>` | 1000 | Fade polygons in/out over this many ms at appearance/disappearance |
 | `--padding-width <amount>` | — | Expand each polygon left/right by this amount per side (e.g. `10`, `10px`, `5%`) |
 | `--padding-height <amount>` | — | Expand each polygon top/bottom by this amount per side |
+| `--rebuild-docker-image` | — | Force a rebuild of the `number-jam-alpr` image even if it already exists |
 
 ### Fade implementation
 

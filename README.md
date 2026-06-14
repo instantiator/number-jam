@@ -61,19 +61,20 @@ This tool can run under Linux or Mac OS. In both cases, Docker must be available
 
 ```bash
 brew install --cask docker-desktop
-npm install -g number-jam
-docker build -t number-jam-alpr "$(npm root -g)/number-jam/docker/"
+npx number-jam --help
 ```
 
 #### Linux (Ubuntu/Debian)
 
 ```bash
 sudo apt-get install docker.io && sudo systemctl start docker
-npm install -g number-jam
-docker build -t number-jam-alpr "$(npm root -g)/number-jam/docker/"
+npx number-jam --help
 ```
 
-The Docker image only needs rebuilding when number-jam is updated.
+The `number-jam-alpr` Docker image is built automatically on first run. If you update number-jam and need to refresh the image, pass `--rebuild-docker-image` on the next invocation.
+
+> [!TIP]
+> Use `npx number-jam` to run without a global install. To install globally instead: `npm install -g number-jam`.
 
 ### Invocations
 
@@ -100,8 +101,6 @@ number-jam --input video.mp4 --verbose
 number-jam --input video.mp4 > results.json
 ```
 
-Use `npx number-jam` in place of `number-jam` to run without a global install.
-
 ### Options
 
 | Flag                              | Description                                                                      |
@@ -116,6 +115,7 @@ Use `npx number-jam` in place of `number-jam` to run without a global install.
 | `-f`, `--fade-duration <ms>`      | Fade obscuring polygons in/out over this many ms at each appearance (default: 1000) |
 | `--padding-width <amount>`        | Expand each polygon horizontally on each side — e.g. `10`, `10px`, `5%`         |
 | `--padding-height <amount>`       | Expand each polygon vertically on each side — e.g. `10`, `10px`, `5%`           |
+| `--rebuild-docker-image`          | Force a rebuild of the `number-jam-alpr` Docker image even if it already exists  |
 | `-h`, `--help`                    | Show all options and list all accepted region codes                              |
 
 ### Region codes
@@ -210,10 +210,14 @@ number-jam/
 Clone the repo, then use the provided launcher scripts to build and run without a global install:
 
 ```bash
-docker build -t number-jam-alpr docker/
-
 ./run-mac.sh --input video.mp4    # macOS
 ./run-linux.sh --input video.mp4  # Linux
+```
+
+The `number-jam-alpr` Docker image is built automatically on first run. You can also build it manually at any time:
+
+```bash
+docker build -t number-jam-alpr docker/
 ```
 
 The scripts run `npm run build` if `dist/` is missing, then invoke `node dist/cli.js`.
