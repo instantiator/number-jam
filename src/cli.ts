@@ -78,6 +78,10 @@ program
     "--padding-height <amount>",
     "Expand each obscuring polygon vertically by this amount on each side (e.g. 10, 10px, 5%)"
   )
+  .option(
+    "--rebuild-docker-image",
+    "Force a rebuild of the number-jam-alpr Docker image even if it already exists"
+  )
   .helpOption("-h, --help", "Show all options, and list all accepted region codes");
 
 program.addHelpText("after", formatRegionCodeHelp());
@@ -113,6 +117,7 @@ if (require.main === module) {
     fadeDuration?: number;
     paddingWidth?: string;
     paddingHeight?: string;
+    rebuildDockerImage?: boolean;
   }>();
 
   main(opts).catch((err) => {
@@ -132,6 +137,7 @@ async function main(opts: {
   fadeDuration?: number;
   paddingWidth?: string;
   paddingHeight?: string;
+  rebuildDockerImage?: boolean;
 }): Promise<void> {
   const startTime = Date.now();
 
@@ -148,7 +154,7 @@ async function main(opts: {
   const regions = parseRegions(opts.regions);
   warnUnknownRegions(regions);
 
-  const engine = new DockerAlprEngine(opts.confidence ?? 0);
+  const engine = new DockerAlprEngine(opts.confidence ?? 0, !!opts.rebuildDockerImage);
   await engine.check();
   await engine.startup();
 

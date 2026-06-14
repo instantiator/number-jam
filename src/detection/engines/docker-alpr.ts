@@ -14,6 +14,7 @@
 import { spawn } from "child_process";
 import { readFile } from "fs/promises";
 import * as net from "net";
+import * as path from "path";
 import { DetectionEngine } from "../engine";
 import { PlateDetection, Point } from "../../types";
 
@@ -52,21 +53,23 @@ export class DockerAlprEngine implements DetectionEngine {
   private containerName: string;
   private port: number = 0;
   private minConfidence: number;
+  private rebuildImage: boolean;
 
-  constructor(minConfidence = 0) {
+  constructor(minConfidence = 0, rebuildImage = false) {
     this.containerName = `number-jam-alpr-${process.pid}`;
     this.minConfidence = minConfidence;
+    this.rebuildImage = rebuildImage;
   }
 
   /**
-   * Verify that Docker is installed, the daemon is running, and the
-   * number-jam-alpr image is present.  Throws an actionable error for each
-   * failure mode.
+   * Verify that Docker is installed and the daemon is running, then ensure
+   * the number-jam-alpr image exists, building it if necessary.  Throws an
+   * actionable error for each failure mode.
    */
   async check(): Promise<void> {
     await this.checkDockerCli();
     await this.checkDockerDaemon();
-    await this.checkImage();
+    await this.ensureImage();
   }
 
   /**
@@ -166,18 +169,44 @@ export class DockerAlprEngine implements DetectionEngine {
     }
   }
 
-  private async checkImage(): Promise<void> {
-    // `docker images -q` is more reliable on macOS Docker Desktop than
-    // `docker image inspect`: it queries the image listing rather than
-    // resolving a specific image manifest, which avoids spurious failures
-    // when the context socket is being refreshed.
+  /**
+   * Ensure the number-jam-alpr image is present, building it from the bundled
+   * {@link docker/} directory if it is missing or if {@link rebuildImage} is set.
+   *
+   * `docker images -q` is more reliable on macOS Docker Desktop than
+   * `docker image inspect`: it queries the image listing rather than resolving a
+   * specific image manifest, which avoids spurious failures when the context
+   * socket is being refreshed.
+   */
+  private async ensureImage(): Promise<void> {
     const id = await captureStdout("docker", ["images", "-q", "number-jam-alpr"]);
-    if (!id.trim()) {
-      throw new Error(
-        "Docker image 'number-jam-alpr' not found.\n" +
-          "  Build it first:  docker build -t number-jam-alpr docker/"
-      );
-    }
+    const exists = !!id.trim();
+
+    if (exists && !this.rebuildImage) return;
+
+    const verb = exists ? "Rebuilding" : "Building";
+    process.stderr.write(`${verb} number-jam-alpr Docker image (this may take a few minutes on first run)…\n`);
+    await this.buildImage();
+    process.stderr.write("Docker image built successfully.\n");
+  }
+
+  /** Build the number-jam-alpr image from the bundled docker/ directory. */
+  private buildImage(): Promise<void> {
+    // __dirname is dist/detection/engines/ at runtime; docker/ lives at the package root.
+    const dockerDir = path.resolve(__dirname, "../../../docker");
+    return new Promise((resolve, reject) => {
+      const proc = spawn("docker", ["build", "-t", "number-jam-alpr", dockerDir], {
+        stdio: ["ignore", "inherit", "inherit"],
+      });
+      proc.on("error", (err) => reject(new Error(`docker error: ${err.message}`)));
+      proc.on("close", (code) => {
+        if (code !== 0) {
+          reject(new Error("docker build failed"));
+        } else {
+          resolve();
+        }
+      });
+    });
   }
 
   /** Poll the container's health endpoint until it responds or we time out. */
