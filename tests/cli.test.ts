@@ -7,7 +7,47 @@
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { parseRegions, warnUnknownRegions } from "../src/cli";
+import { parseRegions, parsePaddingSpec, warnUnknownRegions } from "../src/cli";
+
+// parsePaddingSpec
+
+describe("parsePaddingSpec", () => {
+  it("parses a bare number as pixels", () => {
+    expect(parsePaddingSpec("10")).toEqual({ value: 10, unit: "px" });
+  });
+
+  it("parses a px-suffixed value", () => {
+    expect(parsePaddingSpec("10px")).toEqual({ value: 10, unit: "px" });
+  });
+
+  it("parses a percentage value", () => {
+    expect(parsePaddingSpec("5%")).toEqual({ value: 5, unit: "%" });
+  });
+
+  it("parses a decimal percentage", () => {
+    expect(parsePaddingSpec("0.5%")).toEqual({ value: 0.5, unit: "%" });
+  });
+
+  it("parses zero", () => {
+    expect(parsePaddingSpec("0")).toEqual({ value: 0, unit: "px" });
+  });
+
+  it("parses a decimal pixel value", () => {
+    expect(parsePaddingSpec("2.5px")).toEqual({ value: 2.5, unit: "px" });
+  });
+
+  it("trims surrounding whitespace", () => {
+    expect(parsePaddingSpec("  10px  ")).toEqual({ value: 10, unit: "px" });
+  });
+
+  it("throws for non-numeric input", () => {
+    expect(() => parsePaddingSpec("abc")).toThrow();
+  });
+
+  it("throws for a negative value", () => {
+    expect(() => parsePaddingSpec("-5px")).toThrow();
+  });
+});
 
 // parseRegions
 

@@ -17,8 +17,9 @@ import {
   plateAngleDeg,
   clampedBbox,
   snapPolygonToEdges,
+  expandPolygon,
 } from "../src/obscuring/obscurer";
-import { PlateDetection } from "../src/types";
+import { PlateDetection, PaddingSpec } from "../src/types";
 
 // Geometry helpers
 
@@ -174,6 +175,77 @@ describe("snapPolygonToEdges", () => {
   });
 });
 
+// expandPolygon
+
+describe("expandPolygon", () => {
+  const W = 1920;
+  const H = 1080;
+
+  /** Simple 200×60 rectangle centred at (300, 200). */
+  const poly: [number, number][] = [
+    [200, 170],
+    [400, 170],
+    [400, 230],
+    [200, 230],
+  ];
+
+  it("returns the original polygon when no padding is given", () => {
+    const result = expandPolygon(poly, undefined, undefined, W, H);
+    expect(result).toEqual(poly);
+  });
+
+  it("expands left and right by px amount and keeps centre X unchanged", () => {
+    const pw: PaddingSpec = { value: 10, unit: "px" };
+    const result = expandPolygon(poly, pw, undefined, W, H);
+    const xs = result.map(([x]) => x);
+    expect(Math.min(...xs)).toBeCloseTo(190);
+    expect(Math.max(...xs)).toBeCloseTo(410);
+    // Centre X: (190+410)/2 = 300 — unchanged
+    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(300);
+  });
+
+  it("expands top and bottom by px amount and keeps centre Y unchanged", () => {
+    const ph: PaddingSpec = { value: 5, unit: "px" };
+    const result = expandPolygon(poly, undefined, ph, W, H);
+    const ys = result.map(([, y]) => y);
+    expect(Math.min(...ys)).toBeCloseTo(165);
+    expect(Math.max(...ys)).toBeCloseTo(235);
+    expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(200);
+  });
+
+  it("resolves % as a fraction of the polygon's own dimension (each side)", () => {
+    // Width = 200px, 10% → 20px per side
+    const pw: PaddingSpec = { value: 10, unit: "%" };
+    const result = expandPolygon(poly, pw, undefined, W, H);
+    const xs = result.map(([x]) => x);
+    expect(Math.min(...xs)).toBeCloseTo(180);  // 200 - 20
+    expect(Math.max(...xs)).toBeCloseTo(420);  // 400 + 20
+  });
+
+  it("clamps expansion to frame bounds", () => {
+    const nearEdge: [number, number][] = [[5, 5], [50, 5], [50, 20], [5, 20]];
+    const pw: PaddingSpec = { value: 20, unit: "px" };
+    const ph: PaddingSpec = { value: 20, unit: "px" };
+    const result = expandPolygon(nearEdge, pw, ph, W, H);
+    const xs = result.map(([x]) => x);
+    const ys = result.map(([, y]) => y);
+    expect(Math.min(...xs)).toBe(0);
+    expect(Math.min(...ys)).toBe(0);
+  });
+
+  it("returns a 4-point axis-aligned rectangle regardless of original polygon shape", () => {
+    const tilted: [number, number][] = [[100, 200], [300, 180], [310, 240], [110, 260]];
+    const pw: PaddingSpec = { value: 5, unit: "px" };
+    const result = expandPolygon(tilted, pw, undefined, W, H);
+    expect(result).toHaveLength(4);
+    // All 4 corners must form an axis-aligned box
+    const xs = result.map(([x]) => x);
+    const ys = result.map(([, y]) => y);
+    expect(new Set(xs).size).toBe(2);  // exactly 2 distinct x values
+    expect(new Set(ys).size).toBe(2);  // exactly 2 distinct y values
+  });
+});
+
 // obscureFrame end-to-end
 
 describe("obscureFrame", () => {
@@ -255,6 +327,62 @@ describe("obscureFrame", () => {
     };
     // The bounding box will be clamped to zero size and the overlay skipped.
     await expect(obscureFrame(srcPath, [det], outPath)).resolves.not.toThrow();
+  });
+
+  it("produces the same output as no-detections when fadeAlpha is 0", async () => {
+    const det: PlateDetection = {
+      plate: "AB12CDE",
+      confidence: 90,
+      region: "gb",
+      regionConfidence: 75,
+      polygon: [[20, 20], [100, 20], [100, 50], [20, 50]],
+      frameIndex: 0,
+    };
+    const noneOut  = path.join(tmpDir, "fade0-none.jpg");
+    const fadeOut  = path.join(tmpDir, "fade0-detect.jpg");
+    await obscureFrame(srcPath, [], noneOut);
+    await obscureFrame(srcPath, [det], fadeOut, { fadeAlpha: 0 });
+    // Fully transparent overlay — both outputs must be identical byte-for-byte
+    // (or at least produce the same pixel content; JPEG re-encoding may differ,
+    // so compare sharp-decoded raw buffers instead).
+    const { data: d1 } = await sharp(noneOut).raw().toBuffer({ resolveWithObject: true });
+    const { data: d2 } = await sharp(fadeOut).raw().toBuffer({ resolveWithObject: true });
+    expect(Buffer.compare(d1, d2)).toBe(0);
+  });
+
+  it("produces a different composite at fadeAlpha 0.5 vs fadeAlpha 1.0", async () => {
+    const det: PlateDetection = {
+      plate: "AB12CDE",
+      confidence: 90,
+      region: "gb",
+      regionConfidence: 75,
+      polygon: [[20, 20], [100, 20], [100, 50], [20, 50]],
+      frameIndex: 0,
+    };
+    const half = path.join(tmpDir, "fade-half.jpg");
+    const full = path.join(tmpDir, "fade-full.jpg");
+    await obscureFrame(srcPath, [det], half, { fadeAlpha: 0.5 });
+    await obscureFrame(srcPath, [det], full, { fadeAlpha: 1.0 });
+    const { data: d1 } = await sharp(half).raw().toBuffer({ resolveWithObject: true });
+    const { data: d2 } = await sharp(full).raw().toBuffer({ resolveWithObject: true });
+    expect(Buffer.compare(d1, d2)).not.toBe(0);
+  });
+
+  it("pads the obscured region when paddingW is set", async () => {
+    // Narrow polygon; with large padding the obscured region must be wider.
+    const narrowPoly: [number, number][] = [[90, 30], [110, 30], [110, 60], [90, 60]];
+    const det: PlateDetection = {
+      plate: "XX", confidence: 80, region: null, regionConfidence: 0,
+      polygon: narrowPoly, frameIndex: 0,
+    };
+    const noPad  = path.join(tmpDir, "pad-none.jpg");
+    const withPad = path.join(tmpDir, "pad-width.jpg");
+    await obscureFrame(srcPath, [det], noPad);
+    await obscureFrame(srcPath, [det], withPad, { paddingW: { value: 30, unit: "px" } });
+    // The padded frame must differ from the unpadded frame.
+    const { data: d1 } = await sharp(noPad).raw().toBuffer({ resolveWithObject: true });
+    const { data: d2 } = await sharp(withPad).raw().toBuffer({ resolveWithObject: true });
+    expect(Buffer.compare(d1, d2)).not.toBe(0);
   });
 
   it("obscures two separate polygons in the same frame", async () => {

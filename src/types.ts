@@ -4,6 +4,17 @@
 export type Point = [number, number];
 
 /**
+ * A padding amount for polygon expansion, expressed as either an absolute pixel
+ * count or a percentage of the polygon's own width or height.
+ */
+export interface PaddingSpec {
+  /** The numeric amount. */
+  value: number;
+  /** Whether {@link value} is an absolute pixel count or a percentage of the relevant dimension. */
+  unit: "px" | "%";
+}
+
+/**
  * A detected number plate within a single video frame.
  */
 export interface PlateDetection {
