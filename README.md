@@ -1,6 +1,8 @@
 # number-jam
 
 [![CI](https://github.com/instantiator/number-jam/actions/workflows/main.yml/badge.svg)](https://github.com/instantiator/number-jam/actions/workflows/main.yml)
+[![Release](https://github.com/instantiator/number-jam/actions/workflows/release.yml/badge.svg)](https://github.com/instantiator/number-jam/actions/workflows/release.yml)
+[![npm version](https://img.shields.io/npm/v/number-jam.svg)](https://www.npmjs.com/package/number-jam)
 
 Detects, tracks, and optionally obscures vehicle number plates in video clips.
 
@@ -59,43 +61,43 @@ This tool can run under Linux or Mac OS. In both cases, Docker must be available
 
 ```bash
 brew install --cask docker-desktop
-docker build -t number-jam-alpr docker/
-npm install
-npm run build
+npm install -g number-jam
+docker build -t number-jam-alpr "$(npm root -g)/number-jam/docker/"
 ```
 
 #### Linux (Ubuntu/Debian)
 
 ```bash
 sudo apt-get install docker.io && sudo systemctl start docker
-docker build -t number-jam-alpr docker/
-npm install
-npm run build
+npm install -g number-jam
+docker build -t number-jam-alpr "$(npm root -g)/number-jam/docker/"
 ```
+
+The Docker image only needs rebuilding when number-jam is updated.
 
 ### Invocations
 
 ```bash
 # Basic detection — print JSON to stdout
-./run-mac.sh --input path/to/video.mp4
+number-jam --input path/to/video.mp4
 
 # Filter by region (comma-separated ISO codes)
-./run-mac.sh --input video.mp4 --regions gb,de,fr
+number-jam --input video.mp4 --regions gb,de,fr
 
 # Detect and obscure plates in an output video
-./run-mac.sh --input video.mp4 --obscure output.mp4
+number-jam --input video.mp4 --obscure output.mp4
 
 # Extend obscured plates 5 seconds before/after each track
-./run-mac.sh --input video.mp4 --obscure output.mp4 -x 5000
+number-jam --input video.mp4 --obscure output.mp4 -x 5000
 
 # Include full frame-by-frame tracking history in JSON output
-./run-mac.sh --input video.mp4 --verbose
+number-jam --input video.mp4 --verbose
 
 # Pipe JSON output to a file
-./run-mac.sh --input video.mp4 > results.json
+number-jam --input video.mp4 > results.json
 ```
 
-On Linux, replace `./run-mac.sh` with `./run-linux.sh`.
+Use `npx number-jam` in place of `number-jam` to run without a global install.
 
 ### Options
 
@@ -115,7 +117,7 @@ On Linux, replace `./run-mac.sh` with `./run-linux.sh`.
 Region codes follow ISO 3166-1 alpha-2 (e.g. `gb`, `de`, `fr`, `us`, `au`). Run the following to see every accepted code:
 
 ```bash
-./run-mac.sh --help
+number-jam --help
 ```
 
 ## Output format
@@ -171,7 +173,46 @@ The tool prints a single JSON document to stdout:
 
 Progress information (frame count, detection counts, etc.) is written to **stderr** so that stdout can be cleanly piped to `jq` or a file.
 
-## Running tests
+---
+
+## Dev notes
+
+### Project structure
+
+```
+number-jam/
+├── src/
+│   ├── cli/         Phase functions, character scan, progress bars
+│   ├── detection/   DetectionEngine interface, frame iterator, docker-alpr backend
+│   ├── obscuring/   Feathered colour-fill obscurer
+│   ├── output/      JSON output document builder
+│   ├── regions/     Plate-format regex database and region inference
+│   ├── tracking/    IOU tracker, motion helpers, SAD visual tracker
+│   ├── video/       Frame extractor and video composer (ffmpeg)
+│   ├── cli.ts       Entry point — orchestrates the full pipeline
+│   └── types.ts     Shared TypeScript interfaces
+├── docker/          Dockerfile and Flask HTTP wrapper for OpenALPR
+├── scripts/         Install scripts, fixture downloader, plate-format generator
+└── tests/
+    ├── fixtures/    Static test fixtures (images, video clip, attribution)
+    │   └── videos/  User-supplied plate-coverage clips (git-ignored)
+    └── integration/ Integration tests and TestVideoMetadata type
+```
+
+### Running from source
+
+Clone the repo, then use the provided launcher scripts to build and run without a global install:
+
+```bash
+docker build -t number-jam-alpr docker/
+
+./run-mac.sh --input video.mp4    # macOS
+./run-linux.sh --input video.mp4  # Linux
+```
+
+The scripts run `npm run build` if `dist/` is missing, then invoke `node dist/cli.js`.
+
+### Running tests
 
 ```bash
 # Unit tests (Docker not required)
@@ -191,7 +232,24 @@ See `tests/fixtures/ATTRIBUTION.md` for licence details on the downloaded fixtur
 npm run download-fixtures
 ```
 
-### Adding plate-coverage video fixtures
+#### Unit test files
+
+| File                              | What it tests                                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------------- |
+| `tests/plate-formats.test.ts`     | Every regex in the plate-formats database — one passing + one failing example each |
+| `tests/tracker.test.ts`           | IOU tracker logic (assignment, gap-filling, track closure)                         |
+| `tests/motion.test.ts`            | Centroid, velocity, and polygon-shift helpers                                      |
+| `tests/phases.test.ts`            | `velocityFromBackCoverage` helper                                                  |
+| `tests/detection-engines.test.ts` | JSON parser fixtures for docker-alpr output format                                 |
+| `tests/polygon-merge.test.ts`     | `mergeOverlappingPolygons` union-find algorithm                                    |
+| `tests/visual-tracker.test.ts`    | SAD template-matching tracker on synthetic JPEG frames                             |
+| `tests/character-scan.test.ts`    | Tesseract character scan on synthetic JPEG frames                                  |
+| `tests/obscurer.test.ts`          | Plate obscuring geometry helpers and end-to-end                                    |
+| `tests/infer-region.test.ts`      | Region inference utility (plate text → ISO region code)                            |
+| `tests/formatter.test.ts`         | JSON output document builder                                                       |
+| `tests/cli.test.ts`               | `parseRegions` and `warnUnknownRegions` helpers                                    |
+
+#### Adding plate-coverage video fixtures
 
 `tests/integration/plate-coverage.test.ts` discovers every `.mp4` in `tests/fixtures/videos/` and runs the full pipeline against it. The directory is git-ignored — add your own clips locally.
 
@@ -232,49 +290,6 @@ The tests that run per plate:
 | covers the plate during exit from `<edge>`                | `hasExits` includes that edge   |
 | obscures the plate region without readable text remaining | always                          |
 
----
-
-## Dev notes
-
-### Project structure
-
-```
-number-jam/
-├── src/
-│   ├── cli/         Phase functions, character scan, progress bars
-│   ├── detection/   DetectionEngine interface, frame iterator, docker-alpr backend
-│   ├── obscuring/   Feathered colour-fill obscurer
-│   ├── output/      JSON output document builder
-│   ├── regions/     Plate-format regex database and region inference
-│   ├── tracking/    IOU tracker, motion helpers, SAD visual tracker
-│   ├── video/       Frame extractor and video composer (ffmpeg)
-│   ├── cli.ts       Entry point — orchestrates the full pipeline
-│   └── types.ts     Shared TypeScript interfaces
-├── docker/          Dockerfile and Flask HTTP wrapper for OpenALPR
-├── scripts/         Install scripts, fixture downloader, plate-format generator
-└── tests/
-    ├── fixtures/    Static test fixtures (images, video clip, attribution)
-    │   └── videos/  User-supplied plate-coverage clips (git-ignored)
-    └── integration/ Integration tests and TestVideoMetadata type
-```
-
-### Unit test files
-
-| File                              | What it tests                                                                      |
-| --------------------------------- | ---------------------------------------------------------------------------------- |
-| `tests/plate-formats.test.ts`     | Every regex in the plate-formats database — one passing + one failing example each |
-| `tests/tracker.test.ts`           | IOU tracker logic (assignment, gap-filling, track closure)                         |
-| `tests/motion.test.ts`            | Centroid, velocity, and polygon-shift helpers                                      |
-| `tests/phases.test.ts`            | `velocityFromBackCoverage` helper                                                  |
-| `tests/detection-engines.test.ts` | JSON parser fixtures for docker-alpr output format                                 |
-| `tests/polygon-merge.test.ts`     | `mergeOverlappingPolygons` union-find algorithm                                    |
-| `tests/visual-tracker.test.ts`    | SAD template-matching tracker on synthetic JPEG frames                             |
-| `tests/character-scan.test.ts`    | Tesseract character scan on synthetic JPEG frames                                  |
-| `tests/obscurer.test.ts`          | Plate obscuring geometry helpers and end-to-end                                    |
-| `tests/infer-region.test.ts`      | Region inference utility (plate text → ISO region code)                            |
-| `tests/formatter.test.ts`         | JSON output document builder                                                       |
-| `tests/cli.test.ts`               | `parseRegions` and `warnUnknownRegions` helpers                                    |
-
 ### Regenerating the plate-formats database
 
 ```bash
@@ -285,3 +300,27 @@ This fetches several Wikipedia regional vehicle registration plate pages (Europe
 
 > [!NOTE]
 > Newly appended entries are marked `TODO_NON_EXAMPLE` in their `nonExamples` field. Replace these with real failing examples and ensure `npm test` passes before committing.
+
+### Publishing a release
+
+Version numbers follow [semver](https://semver.org). The single source of truth is the `version` field in `package.json`.
+
+```bash
+npm version patch   # 0.1.0 → 0.1.1  (bug fixes)
+npm version minor   # 0.1.0 → 0.2.0  (new features, backwards compatible)
+npm version major   # 0.1.0 → 1.0.0  (breaking changes)
+```
+
+Each command bumps `package.json`, commits the change, and creates a matching git tag (e.g. `v0.2.0`). Push both the commit and the tag:
+
+```bash
+git push --follow-tags
+```
+
+This triggers the [Release workflow](.github/workflows/release.yml), which builds the package and publishes it to npm via OIDC trusted publishing. A GitHub Release is created automatically with generated release notes.
+
+#### Verifying the release
+
+1. Check the [Release workflow run](https://github.com/instantiator/number-jam/actions/workflows/release.yml) completed without errors
+2. Confirm the new version appears on the [npm package page](https://www.npmjs.com/package/number-jam)
+3. Smoke-test the published package: `npx number-jam@latest --help`

@@ -6,7 +6,12 @@
   "bin": {
     "number-jam": "dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "docker/"
+  ],
   "scripts": {
+    "prepublishOnly": "npm run build",
     "build": "tsc",
     "typecheck": "tsc --project tsconfig.test.json",
     "start": "node dist/cli.js",
