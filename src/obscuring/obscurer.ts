@@ -21,7 +21,21 @@
  */
 
 import sharp from "sharp";
-import { PlateDetection, Point } from "../types";
+import { PlateDetection, PaddingSpec, Point } from "../types";
+
+/** Options controlling how a single frame is obscured. */
+export interface ObscureFrameOptions {
+  /**
+   * Alpha multiplier (0–1) applied uniformly to every polygon overlay in this
+   * frame. Used by the fade-in / fade-out extension. Defaults to 1 (fully
+   * opaque).
+   */
+  fadeAlpha?: number;
+  /** Horizontal expansion applied to each polygon on each side before masking. */
+  paddingW?: PaddingSpec;
+  /** Vertical expansion applied to each polygon on each side before masking. */
+  paddingH?: PaddingSpec;
+}
 
 /**
  * Obscure the plate polygons in a single frame image and write the result.
@@ -29,11 +43,13 @@ import { PlateDetection, Point } from "../types";
  * @param framePath   Source JPEG frame.
  * @param detections  Plate detections to obscure within this frame.
  * @param outputPath  Destination file path for the modified frame.
+ * @param options     Optional rendering controls (fade alpha, padding).
  */
 export async function obscureFrame(
   framePath: string,
   detections: PlateDetection[],
-  outputPath: string
+  outputPath: string,
+  options: ObscureFrameOptions = {},
 ): Promise<void> {
   if (detections.length === 0) {
     await sharp(framePath).toFile(outputPath);
@@ -47,7 +63,7 @@ export async function obscureFrame(
 
   for (const detection of detections) {
     if (detection.polygon.length < 3) continue;
-    const overlay = await buildPolygonOverlay(framePath, detection.polygon, frameW, frameH);
+    const overlay = await buildPolygonOverlay(framePath, detection.polygon, frameW, frameH, options);
     if (overlay) overlays.push(overlay);
   }
 
@@ -126,6 +142,46 @@ export function snapPolygonToEdges(polygon: Point[], frameW: number, frameH: num
 }
 
 /**
+ * Expand a polygon outward symmetrically to cover additional area on each
+ * side. The expanded region is axis-aligned and centred on the original
+ * polygon's centre point. Clamped to the frame bounds.
+ *
+ * @param polygon   Original polygon vertices.
+ * @param paddingW  Optional horizontal padding spec (applied to each side).
+ * @param paddingH  Optional vertical padding spec (applied to each side).
+ * @param frameW    Frame pixel width used for clamping and `%` resolution.
+ * @param frameH    Frame pixel height used for clamping and `%` resolution.
+ */
+export function expandPolygon(
+  polygon: Point[],
+  paddingW: PaddingSpec | undefined,
+  paddingH: PaddingSpec | undefined,
+  frameW: number,
+  frameH: number,
+): Point[] {
+  if (!paddingW && !paddingH) return polygon;
+
+  const xs = polygon.map(([x]) => x);
+  const ys = polygon.map(([, y]) => y);
+  const origW = Math.max(...xs) - Math.min(...xs);
+  const origH = Math.max(...ys) - Math.min(...ys);
+
+  const pw = paddingW
+    ? (paddingW.unit === "%" ? (paddingW.value / 100) * origW : paddingW.value)
+    : 0;
+  const ph = paddingH
+    ? (paddingH.unit === "%" ? (paddingH.value / 100) * origH : paddingH.value)
+    : 0;
+
+  const left   = Math.max(0,      Math.min(...xs) - pw);
+  const right  = Math.min(frameW, Math.max(...xs) + pw);
+  const top    = Math.max(0,      Math.min(...ys) - ph);
+  const bottom = Math.min(frameH, Math.max(...ys) + ph);
+
+  return [[left, top], [right, top], [right, bottom], [left, bottom]] as Point[];
+}
+
+/**
  * Build a sharp OverlayOptions that fills the plate polygon with the
  * estimated background colour and soft-feathered edges.
  *
@@ -140,9 +196,11 @@ async function buildPolygonOverlay(
   framePath: string,
   polygon: Point[],
   frameW: number,
-  frameH: number
+  frameH: number,
+  options: ObscureFrameOptions = {},
 ): Promise<sharp.OverlayOptions | null> {
-  const box = clampedBbox(polygon, frameW, frameH);
+  const expanded = expandPolygon(polygon, options.paddingW, options.paddingH, frameW, frameH);
+  const box = clampedBbox(expanded, frameW, frameH);
   if (box.width < 4 || box.height < 4) return null;
 
   const { data, info } = await sharp(framePath)
@@ -177,9 +235,9 @@ async function buildPolygonOverlay(
   const g = bgCount > 0 ? Math.round(gSum / bgCount) : 220;
   const b = bgCount > 0 ? Math.round(bSum / bgCount) : 220;
 
-  // The SVG mask uses the edge-snapped polygon so the obscured region starts
-  // flush with the frame boundary when the plate is near an edge.
-  const snapped = snapPolygonToEdges(polygon, frameW, frameH);
+  // The SVG mask uses the edge-snapped expanded polygon so the obscured region
+  // starts flush with the frame boundary when the plate is near an edge.
+  const snapped = snapPolygonToEdges(expanded, frameW, frameH);
   const pts = snapped.map(([x, y]) => `${Math.round(x)},${Math.round(y)}`).join(" ");
 
   // Greyscale alpha mask: white polygon on opaque black background so that
@@ -189,12 +247,18 @@ async function buildPolygonOverlay(
   // solid-colour image rather than blurring the RGBA overlay directly,
   // which would cause the fill colour to bleed towards black at the edges.
   const maskSvg = `<svg width="${frameW}" height="${frameH}" xmlns="http://www.w3.org/2000/svg"><rect width="${frameW}" height="${frameH}" fill="black"/><polygon points="${pts}" fill="white"/></svg>`;
-  const blurredMask = await sharp(Buffer.from(maskSvg))
+  const rawMask = await sharp(Buffer.from(maskSvg))
     .flatten({ background: { r: 0, g: 0, b: 0 } })
     .greyscale()
     .blur(EDGE_BLUR_SIGMA)
     .raw()
     .toBuffer();
+
+  // Apply fade alpha by scaling every mask pixel. Skip allocation when fully opaque.
+  const fadeAlpha = options.fadeAlpha ?? 1;
+  const blurredMask = fadeAlpha < 1
+    ? Buffer.from(rawMask.map((v) => Math.round(v * fadeAlpha)))
+    : rawMask;
 
   const overlay = await sharp({
     create: { width: frameW, height: frameH, channels: 3, background: { r, g, b } },

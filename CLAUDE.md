@@ -143,6 +143,29 @@ Phase 3b extends each detected track using three layers in priority order:
 
 - Multiple simultaneous regions (docker-alpr): OpenALPR `-c <country>` accepts one country at a time. When `-r` specifies multiple regions, the tool runs without `-c` and post-filters results.
 
+### CLI options (obscuring)
+
+| Flag | Default | Description |
+|---|---|---|
+| `-o`, `--obscured-output <path>` | — | Write obscured video to this path |
+| `-x`, `--extend-detection <ms>` | 2000 | Velocity-extrapolate polygons this many ms past visual tracking |
+| `-m`, `--min-fraction <n>` | 0.01 | Minimum visible plate fraction to include a frame |
+| `-f`, `--fade-duration <ms>` | 1000 | Fade polygons in/out over this many ms at appearance/disappearance |
+| `--padding-width <amount>` | — | Expand each polygon left/right by this amount per side (e.g. `10`, `10px`, `5%`) |
+| `--padding-height <amount>` | — | Expand each polygon top/bottom by this amount per side |
+
+### Fade implementation
+
+`computeFadeExtensions` (`src/cli/phases.ts`) runs after `runTrackCoverage`. It finds contiguous runs in `trackPolygons` and adds:
+- **Fade-in frames** before each run using the run's first polygon, with alpha ramping 0 → 1.
+- **Fade-out frames** after each run using the run's last polygon, with alpha ramping 1 → 0.
+
+If the fade window would extend past the video start or end, the window is clipped but the alpha rate is unchanged (partial fade). The resulting `fadeAlphas: Map<number, number>` is passed to `runObscuring` and applied per-frame in `buildPolygonOverlay` by scaling the blurred mask buffer.
+
+### Padding implementation
+
+`expandPolygon` (`src/obscuring/obscurer.ts`) converts the ANPR polygon to an axis-aligned rectangle expanded by the padding amount on each side, keeping the polygon centred on its original centre point. `%` values are a percentage of the polygon's own width or height (each side). The expanded polygon is used for both colour sampling and the SVG alpha mask.
+
 ### Environment variables
 
 - `RUN_INTEGRATION_TESTS=1` — enables integration tests that require Docker or Python

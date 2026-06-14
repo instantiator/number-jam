@@ -16,12 +16,14 @@ import { Command } from "commander";
 import { DockerAlprEngine } from "./detection/engines/docker-alpr";
 import { buildOutputDoc } from "./output/formatter";
 import { PLATE_FORMATS } from "./regions/plate-formats";
+import { PaddingSpec } from "./types";
 import {
   runExtraction,
   runPreProcessing,
   runDetection,
   runTrackBuilding,
   runTrackCoverage,
+  computeFadeExtensions,
   runObscuring,
   runComposition,
 } from "./cli/phases";
@@ -29,6 +31,7 @@ import { runCharacterScan } from "./cli/character-scan";
 
 const DEFAULT_EXTEND_DETECTION_MS = 2000;
 const DEFAULT_MIN_VISIBLE_FRACTION = 0.01;
+const DEFAULT_FADE_DURATION_MS = 1000;
 
 const program = new Command();
 
@@ -37,8 +40,8 @@ program
   .description("Detect, track, and optionally obscure number plates in a video file.")
   .requiredOption("-i, --input <path>", "Path to the input video file")
   .option(
-    "-o, --obscure <path>",
-    "Obscure detected number plates in the output video (path to an output video file)"
+    "-o, --obscured-output <path>",
+    "Obscure detected number plates and write the output video to this path"
   )
   .option(
     "-r, --regions <codes>",
@@ -61,6 +64,19 @@ program
     "-m, --min-fraction <number>",
     `Minimum visible plate fraction (0–1) required to include a frame in obscuring (default: ${DEFAULT_MIN_VISIBLE_FRACTION})`,
     parseFloat
+  )
+  .option(
+    "-f, --fade-duration <ms>",
+    "Fade obscuring polygons in/out over this many milliseconds at their first/last appearance (default: 1000)",
+    parseInt
+  )
+  .option(
+    "--padding-width <amount>",
+    "Expand each obscuring polygon horizontally by this amount on each side (e.g. 10, 10px, 5%)"
+  )
+  .option(
+    "--padding-height <amount>",
+    "Expand each obscuring polygon vertically by this amount on each side (e.g. 10, 10px, 5%)"
   )
   .helpOption("-h, --help", "Show all options, and list all accepted region codes");
 
@@ -88,12 +104,15 @@ if (require.main === module) {
 
   const opts = program.opts<{
     input: string;
-    obscure?: string;
+    obscuredOutput?: string;
     regions: string;
     verbose?: boolean;
     confidence?: number;
     extendDetection?: number;
     minFraction?: number;
+    fadeDuration?: number;
+    paddingWidth?: string;
+    paddingHeight?: string;
   }>();
 
   main(opts).catch((err) => {
@@ -104,20 +123,23 @@ if (require.main === module) {
 
 async function main(opts: {
   input: string;
-  obscure?: string;
+  obscuredOutput?: string;
   regions: string;
   verbose?: boolean;
   confidence?: number;
   extendDetection?: number;
   minFraction?: number;
+  fadeDuration?: number;
+  paddingWidth?: string;
+  paddingHeight?: string;
 }): Promise<void> {
   const startTime = Date.now();
 
   if (!fs.existsSync(opts.input)) {
     throw new Error(`Input file not found: ${opts.input}`);
   }
-  if (opts.obscure) {
-    const outDir = path.dirname(path.resolve(opts.obscure));
+  if (opts.obscuredOutput) {
+    const outDir = path.dirname(path.resolve(opts.obscuredOutput));
     if (!fs.existsSync(outDir)) {
       throw new Error(`Output directory does not exist: ${outDir}`);
     }
@@ -141,13 +163,13 @@ async function main(opts: {
     await runPreProcessing(frames, videoInfo.width);
     let frameResults = await runDetection(frames, regions, engine);
 
-    if (opts.obscure) {
+    if (opts.obscuredOutput) {
       frameResults = await runCharacterScan(frames, frameResults, videoInfo.width, videoInfo.height);
     }
 
     const tracks = runTrackBuilding(frameResults, videoInfo.fps);
 
-    if (opts.obscure) {
+    if (opts.obscuredOutput) {
       const extendMs = opts.extendDetection ?? DEFAULT_EXTEND_DETECTION_MS;
       const extendFrames = Math.max(1, Math.round((extendMs / 1000) * videoInfo.fps));
       const minFraction = opts.minFraction ?? DEFAULT_MIN_VISIBLE_FRACTION;
@@ -155,14 +177,25 @@ async function main(opts: {
         tracks, frames, extendFrames, videoInfo.width, videoInfo.height, videoInfo.fps, minFraction,
       );
 
+      const fadeDurationMs = opts.fadeDuration ?? DEFAULT_FADE_DURATION_MS;
+      const fadeFrames = Math.max(0, Math.round((fadeDurationMs / 1000) * videoInfo.fps));
+      const { extensions, fadeAlphas } = computeFadeExtensions(trackPolygons, fadeFrames, frames.length);
+      for (const [fi, polys] of extensions) {
+        trackPolygons.set(fi, polys);
+      }
+
       const obscureDir = path.join(tmpDir, "obscured");
       fs.mkdirSync(obscureDir);
-      await runObscuring(frames, trackPolygons, obscureDir);
+      await runObscuring(frames, trackPolygons, obscureDir, {
+        fadeAlphas,
+        paddingW: opts.paddingWidth ? parsePaddingSpec(opts.paddingWidth) : undefined,
+        paddingH: opts.paddingHeight ? parsePaddingSpec(opts.paddingHeight) : undefined,
+      });
       await runComposition(
         obscureDir,
         videoInfo.fps,
         inputPath,
-        path.resolve(opts.obscure),
+        path.resolve(opts.obscuredOutput),
         frames.length,
       );
     }
@@ -171,13 +204,13 @@ async function main(opts: {
       {
         path: opts.input,
         regions,
-        obscure: !!opts.obscure,
+        obscure: !!opts.obscuredOutput,
         verbose: !!opts.verbose,
       },
       tracks,
       videoInfo.durationSeconds,
       Date.now() - startTime,
-      opts.obscure ? path.resolve(opts.obscure) : null,
+      opts.obscuredOutput ? path.resolve(opts.obscuredOutput) : null,
     );
 
     process.stdout.write(JSON.stringify(doc, null, 2) + "\n");
@@ -216,6 +249,26 @@ export function warnUnknownRegions(regions: string[]): void {
     );
   }
   process.stderr.write(formatRegionCodeHelp() + "\n");
+}
+
+/**
+ * Parse a padding amount string into a {@link PaddingSpec}.
+ *
+ * Accepts bare numbers (`"10"`), pixel-suffixed values (`"10px"`), and
+ * percentage values (`"5%"`). Throws on invalid input.
+ * Exported for unit testing.
+ */
+export function parsePaddingSpec(raw: string): PaddingSpec {
+  const trimmed = raw.trim();
+  if (trimmed.endsWith("%")) {
+    const value = parseFloat(trimmed.slice(0, -1));
+    if (isNaN(value) || value < 0) throw new Error(`Invalid padding value: "${raw}"`);
+    return { value, unit: "%" };
+  }
+  const numPart = trimmed.endsWith("px") ? trimmed.slice(0, -2) : trimmed;
+  const value = parseFloat(numPart);
+  if (isNaN(value) || value < 0) throw new Error(`Invalid padding value: "${raw}"`);
+  return { value, unit: "px" };
 }
 
 /** Format the region codes section for help and warning output. */

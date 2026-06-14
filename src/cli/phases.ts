@@ -19,7 +19,7 @@ import { obscureFrame } from "../obscuring/obscurer";
 import { composeVideo } from "../video/composer";
 import { createProgressBar } from "./progress";
 import { DetectionEngine } from "../detection/engine";
-import { FrameInfo, FrameResult, Track, Point, PlateDetection } from "../types";
+import { FrameInfo, FrameResult, Track, Point, PlateDetection, PaddingSpec } from "../types";
 
 /**
  * Phase 1: probe video metadata then extract all frames as JPEGs.
@@ -409,16 +409,106 @@ export async function runTrackCoverage(
 }
 
 /**
+ * Compute fade-in and fade-out extension frames for each contiguous run of
+ * rendered polygons in {@link trackPolygons}.
+ *
+ * For each run `[F_start … F_end]`:
+ * - Adds up to {@link fadeFrames} new entries **before** F_start using the
+ *   polygon from F_start (fade in from transparent).
+ * - Adds up to {@link fadeFrames} new entries **after** F_end using the
+ *   polygon from F_end (fade out to transparent).
+ *
+ * If the fade window would extend past the video boundaries it is clipped, but
+ * the alpha rate is unchanged so the fade appears to start or finish partway
+ * through (as requested by the caller).
+ *
+ * Exported for unit testing.
+ *
+ * @param trackPolygons  Current frame→polygon map (not mutated).
+ * @param fadeFrames     Number of frames for the full fade transition.
+ * @param totalFrames    Total frame count of the video.
+ * @returns              `extensions` — new frame→polygon entries to merge into
+ *                       trackPolygons, and `fadeAlphas` — per-frame alpha for
+ *                       each extension frame.
+ */
+export function computeFadeExtensions(
+  trackPolygons: Map<number, Point[][]>,
+  fadeFrames: number,
+  totalFrames: number,
+): { extensions: Map<number, Point[][]>; fadeAlphas: Map<number, number> } {
+  const extensions = new Map<number, Point[][]>();
+  const fadeAlphas = new Map<number, number>();
+
+  if (fadeFrames <= 0 || trackPolygons.size === 0) {
+    return { extensions, fadeAlphas };
+  }
+
+  const sorted = [...trackPolygons.keys()].sort((a, b) => a - b);
+
+  // Identify contiguous runs (consecutive frame indices with gap ≤ 1).
+  const runs: Array<{ start: number; end: number }> = [];
+  let runStart = sorted[0];
+  let prev = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] > prev + 1) {
+      runs.push({ start: runStart, end: prev });
+      runStart = sorted[i];
+    }
+    prev = sorted[i];
+  }
+  runs.push({ start: runStart, end: prev });
+
+  for (const { start, end } of runs) {
+    const startPolygons = trackPolygons.get(start)!;
+    const endPolygons   = trackPolygons.get(end)!;
+
+    // Fade-in: frames before F_start, clipped to video start.
+    const fadeInStart = Math.max(0, start - fadeFrames);
+    for (let fi = fadeInStart; fi < start; fi++) {
+      if (trackPolygons.has(fi) || extensions.has(fi)) continue;
+      extensions.set(fi, startPolygons);
+      // fi=start maps to alpha=1; fi=(start-fadeFrames) maps to alpha=0.
+      const alpha = (fi - (start - fadeFrames)) / fadeFrames;
+      fadeAlphas.set(fi, Math.min(1, Math.max(0, alpha)));
+    }
+
+    // Fade-out: frames after F_end, clipped to last frame.
+    const fadeOutEnd = Math.min(totalFrames - 1, end + fadeFrames);
+    for (let fi = end + 1; fi <= fadeOutEnd; fi++) {
+      if (trackPolygons.has(fi) || extensions.has(fi)) continue;
+      extensions.set(fi, endPolygons);
+      // fi=end+1 maps to alpha=(fadeFrames-1)/fadeFrames; fi=end+fadeFrames maps to alpha=0.
+      const alpha = 1 - (fi - end) / fadeFrames;
+      fadeAlphas.set(fi, Math.min(1, Math.max(0, alpha)));
+    }
+  }
+
+  return { extensions, fadeAlphas };
+}
+
+/** Options controlling how polygons are rendered during the obscuring phase. */
+export interface ObscureOptions {
+  /** Alpha values (0–1) for fade-extension frames; absent frames default to 1. */
+  fadeAlphas?: Map<number, number>;
+  /** Horizontal expansion applied to each polygon on each side. */
+  paddingW?: PaddingSpec;
+  /** Vertical expansion applied to each polygon on each side. */
+  paddingH?: PaddingSpec;
+}
+
+/**
  * Phase 4: obscure detected plates in every frame, parallelised across CPU cores.
  *
  * @param frames         All extracted frames.
  * @param trackPolygons  Per-frameIndex polygon map from {@link runTrackCoverage}.
  * @param obscureDir     Directory to write obscured JPEGs into (must already exist).
+ * @param options        Optional rendering controls (fade alpha, padding).
  */
 export async function runObscuring(
   frames: FrameInfo[],
   trackPolygons: Map<number, Point[][]>,
   obscureDir: string,
+  options: ObscureOptions = {},
 ): Promise<void> {
   const limit = pLimit(os.cpus().length);
   const bar = createProgressBar("Obscuring", frames.length);
@@ -437,7 +527,12 @@ export async function runObscuring(
           frameIndex: frame.frameIndex,
         }));
         const outFramePath = path.join(obscureDir, path.basename(frame.filePath));
-        await obscureFrame(frame.filePath, syntheticDetections, outFramePath);
+        const fadeAlpha = options.fadeAlphas?.get(frame.frameIndex) ?? 1;
+        await obscureFrame(frame.filePath, syntheticDetections, outFramePath, {
+          fadeAlpha,
+          paddingW: options.paddingW,
+          paddingH: options.paddingH,
+        });
         if (syntheticDetections.some((d) => d.polygon.length >= 3)) obscured++;
         bar.increment();
       }),
