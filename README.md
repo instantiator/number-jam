@@ -12,7 +12,7 @@ At the core of this project is [OpenALPR](https://github.com/openalpr/openalpr),
 This project containerises OpenALPR, and supplements its findings with additional steps:
 
 - Plates are initially found with OpenALPR
-- Tesseract is used to identify neary 'missed' characters and expand the bounding box polygon
+- Tesseract is used to identify nearby 'missed' characters and expand plate bounding boxes
 - Short gaps between detections are interpolated
 - SAD[^sad] is used to track motion of plates between, before, and after detections
 - Falls back to velocity extrapolation
