@@ -80,43 +80,43 @@ The `number-jam-alpr` Docker image is built automatically on first run. If you u
 
 ```bash
 # Basic detection — print JSON to stdout
-number-jam --input path/to/video.mp4
+npx number-jam --input path/to/video.mp4
 
 # Filter by region (comma-separated ISO codes)
-number-jam --input video.mp4 --regions gb,de,fr
+npx number-jam --input video.mp4 --regions gb,de,fr
 
 # Detect and obscure plates in an output video
-number-jam --input video.mp4 --obscured-output output.mp4
+npx number-jam --input video.mp4 --obscured-output output.mp4
 
 # Extend obscured plates 5 seconds before/after each track
-number-jam --input video.mp4 --obscured-output output.mp4 -x 5000
+npx number-jam --input video.mp4 --obscured-output output.mp4 -x 5000
 
 # Add padding and a 500 ms fade around each obscuring polygon
-number-jam --input video.mp4 --obscured-output output.mp4 --padding-width 10px --padding-height 5% --fade-duration 500
+npx number-jam --input video.mp4 --obscured-output output.mp4 --padding-width 10px --padding-height 5% --fade-duration 500
 
 # Include full frame-by-frame tracking history in JSON output
-number-jam --input video.mp4 --verbose
+npx number-jam --input video.mp4 --verbose
 
 # Pipe JSON output to a file
-number-jam --input video.mp4 > results.json
+npx number-jam --input video.mp4 > results.json
 ```
 
 ### Options
 
-| Flag                              | Description                                                                      |
-| --------------------------------- | -------------------------------------------------------------------------------- |
-| `-i`, `--input <path>`            | Path to the input video file **(required)**                                      |
-| `-o`, `--obscured-output <path>`  | Obscure detected plates and write the output video to this path                  |
-| `-r`, `--regions <codes>`         | Comma-separated region codes (e.g. `gb,de,us`). Defaults to all.                 |
-| `-v`, `--verbose`                 | Include full frame-by-frame polygon history in JSON output                       |
-| `-c`, `--confidence <n>`          | Drop detections below this OCR confidence threshold (0–100)                      |
-| `-x`, `--extend-detection <ms>`   | Extend obscuring this many milliseconds before/after each track (default: 2000)  |
-| `-m`, `--min-fraction <n>`        | Minimum visible plate fraction (0–1) required to obscure a frame (default: 0.01) |
-| `-f`, `--fade-duration <ms>`      | Fade obscuring polygons in/out over this many ms at each appearance (default: 1000) |
-| `--padding-width <amount>`        | Expand each polygon horizontally on each side — e.g. `10`, `10px`, `5%`         |
-| `--padding-height <amount>`       | Expand each polygon vertically on each side — e.g. `10`, `10px`, `5%`           |
-| `--rebuild-docker-image`          | Force a rebuild of the `number-jam-alpr` Docker image even if it already exists  |
-| `-h`, `--help`                    | Show all options and list all accepted region codes                              |
+| Flag                             | Description                                                                         |
+| -------------------------------- | ----------------------------------------------------------------------------------- |
+| `-i`, `--input <path>`           | Path to the input video file **(required)**                                         |
+| `-o`, `--obscured-output <path>` | Obscure detected plates and write the output video to this path                     |
+| `-r`, `--regions <codes>`        | Comma-separated region codes (e.g. `gb,de,us`). Defaults to all.                    |
+| `-v`, `--verbose`                | Include full frame-by-frame polygon history in JSON output                          |
+| `-c`, `--confidence <n>`         | Drop detections below this OCR confidence threshold (0–100)                         |
+| `-x`, `--extend-detection <ms>`  | Extend obscuring this many milliseconds before/after each track (default: 2000)     |
+| `-m`, `--min-fraction <n>`       | Minimum visible plate fraction (0–1) required to obscure a frame (default: 0.01)    |
+| `-f`, `--fade-duration <ms>`     | Fade obscuring polygons in/out over this many ms at each appearance (default: 1000) |
+| `--padding-width <amount>`       | Expand each polygon horizontally on each side — e.g. `10`, `10px`, `5%`             |
+| `--padding-height <amount>`      | Expand each polygon vertically on each side — e.g. `10`, `10px`, `5%`               |
+| `--rebuild-docker-image`         | Force a rebuild of the `number-jam-alpr` Docker image even if it already exists     |
+| `-h`, `--help`                   | Show all options and list all accepted region codes                                 |
 
 ### Region codes
 
