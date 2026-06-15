@@ -221,26 +221,26 @@ Progress information (frame count, detection counts, etc.) is written to **stder
 number-jam/
 ├── src/
 │   ├── cli/
-│   │   ├── detect.ts       detect sub-command handler
-│   │   ├── obscure.ts      obscure sub-command handler
-│   │   ├── shared.ts       Utilities shared by both sub-commands (parseRegions etc.)
-│   │   ├── phases.ts       Named phase functions (extraction, detection, tracking, obscuring)
+│   │   ├── detect.ts          detect sub-command handler
+│   │   ├── obscure.ts         obscure sub-command handler
+│   │   ├── shared.ts          Utilities shared by both sub-commands (parseRegions etc.)
+│   │   ├── phases.ts          Named phase functions (extraction, detection, tracking, obscuring)
 │   │   ├── character-scan.ts  Tesseract polygon-widening scan
-│   │   └── progress.ts     Progress bar helpers
-│   ├── detection/   DetectionEngine interface, frame iterator, docker-alpr backend
-│   ├── obscuring/   Feathered colour-fill obscurer
-│   ├── output/      JSON output document builder
-│   ├── regions/     Plate-format regex database and region inference
-│   ├── tracking/    IOU tracker, motion helpers, SAD visual tracker
-│   ├── video/       Frame extractor and video composer (ffmpeg)
-│   ├── cli.ts       Entry point — registers detect and obscure sub-commands
-│   └── types.ts     Shared TypeScript interfaces
-├── docker/          Dockerfile and Flask HTTP wrapper for OpenALPR
-├── scripts/         Install scripts, fixture downloader, plate-format generator
+│   │   └── progress.ts        Progress bar helpers
+│   ├── detection/             DetectionEngine interface, frame iterator, docker-alpr backend
+│   ├── obscuring/             Feathered colour-fill obscurer
+│   ├── output/                JSON output document builder
+│   ├── regions/               Plate-format regex database and region inference
+│   ├── tracking/              IOU tracker, motion helpers, SAD visual tracker
+│   ├── video/                 Frame extractor and video composer (ffmpeg)
+│   ├── cli.ts                 Entry point — registers detect and obscure sub-commands
+│   └── types.ts               Shared TypeScript interfaces
+├── docker/                    Dockerfile and Flask HTTP wrapper for OpenALPR
+├── scripts/                   Install scripts, fixture downloader, plate-format generator
 └── tests/
-    ├── fixtures/    Static test fixtures (images, video clip, attribution)
-    │   └── videos/  User-supplied plate-coverage clips (git-ignored)
-    └── integration/ Integration tests and TestVideoMetadata type
+    ├── fixtures/              Static test fixtures (images, video clip, attribution)
+    │   └── videos/            User-supplied plate-coverage clips (git-ignored)
+    └── integration/           Integration tests and TestVideoMetadata type
 ```
 
 ### Running from source
