@@ -187,14 +187,14 @@ describe("plate-coverage integration", () => {
         tracks = runTrackBuilding(frameResults, videoInfo.fps);
 
         const extendFrames = Math.round(videoInfo.fps * 12);
-        trackPolygons = await runTrackCoverage(
+        ({ trackPolygons } = await runTrackCoverage(
           tracks,
           frames,
           extendFrames,
           videoInfo.width,
           videoInfo.height,
           videoInfo.fps,
-        );
+        ));
 
         await runObscuring(frames, trackPolygons, obscureDir);
       }, 1_200_000);

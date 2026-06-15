@@ -82,9 +82,6 @@ export interface Track {
 export interface RequestInfo {
   path: string;
   regions: string[];
-  obscure: boolean;
-  /** When true, the full per-frame tracking history is included in the output. */
-  verbose: boolean;
 }
 
 /**
@@ -105,7 +102,7 @@ export interface PlateSummary {
 export interface OutputDoc {
   request: RequestInfo;
   summary: PlateSummary[];
-  /** Full per-frame tracking history. Empty array when --verbose is not set. */
+  /** Full per-frame tracking history for each detected plate, including visual tracking and velocity extrapolation frames. */
   tracking: Array<{
     plate: string;
     /** Timestamps are milliseconds from the video start, rounded to the nearest integer. */

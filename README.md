@@ -27,33 +27,45 @@ This project containerises OpenALPR, and supplements its findings with additiona
 - SAD[^sad] is used to track motion of plates between, before, and after detections
 - Falls back to velocity extrapolation
 
+The tool is split into two composable verbs:
+
+- **`detect`** — analyses a video and writes a JSON document containing the full per-plate tracking history to stdout
+- **`obscure`** — reads a detect JSON document (from a file or stdin), re-extracts the video frames, and renders an obscured output video
+
 ```mermaid
 flowchart TD
-    A([Input video]) --> B[Extract frames\nffmpeg]
-    B --> C[Pre-process frames\nsharp — sharpen + normalise]
-    C --> D[Detect plates\nDocker + OpenALPR]
-    D --> E{--obscure set?}
-    E -->|Yes| F[Character scan\ntesseract.js — widen detection polygons]
-    E -->|No| G
-    F --> G[Build tracks\nIOU tracker + gap interpolation]
-    G --> H[Extend tracks\nSAD visual tracking + velocity extrapolation]
-    H --> I[Obscure frames\nsharp — feathered colour fill]
-    I --> J[Compose output video\nffmpeg]
-    G --> K([JSON output — stdout])
-    J --> K
+    subgraph detect ["number-jam detect"]
+        A([Input video]) --> B[Extract frames\nffmpeg]
+        B --> C[Pre-process frames\nsharp — sharpen + normalise]
+        C --> D[Detect plates\nDocker + OpenALPR]
+        D --> F[Character scan\ntesseract.js — widen detection polygons]
+        F --> G[Build tracks\nIOU tracker + gap interpolation]
+        G --> H[Extend tracks\nSAD visual tracking + velocity extrapolation]
+        H --> K([JSON output — stdout])
+    end
+
+    subgraph obscure ["number-jam obscure"]
+        K --> L[Reconstruct frame polygons\nfrom tracking history]
+        M([Input video]) --> N[Extract frames\nffmpeg]
+        N --> O[Pre-process frames\nsharp — sharpen + normalise]
+        L --> P[Obscure frames\nsharp — feathered colour fill]
+        O --> P
+        P --> Q[Compose output video\nffmpeg]
+        Q --> R([Obscured video + JSON — stdout])
+    end
 ```
 
-| Step               | What it does                                                                                                                                                                            |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Extract frames** | Pulls every frame from the video as a JPEG using ffmpeg                                                                                                                                 |
-| **Pre-process**    | Sharpens and normalises each frame; upscales if the source is narrower than 1280 px                                                                                                     |
-| **Detect plates**  | Sends each frame to OpenALPR (running in Docker) and collects bounding-box polygons and plate text                                                                                      |
-| **Character scan** | _(Obscuring only)_ Runs tesseract.js on an expanded region around each ANPR detection to find characters that OpenALPR clipped from the polygon edges; widens the polygon to cover them |
-| **Build tracks**   | Links detections across frames using IOU matching; interpolates positions across short gaps                                                                                             |
-| **Extend tracks**  | Extends each track beyond the ANPR detection window using SAD template matching (backward and forward), then velocity extrapolation for `--extend-detection` ms further                 |
-| **Obscure frames** | Fills each detection polygon with a feathered colour sampled from the plate background                                                                                                  |
-| **Compose video**  | Re-encodes the obscured frames into an output video with original audio                                                                                                                 |
-| **JSON output**    | Writes a structured result document to stdout                                                                                                                                           |
+| Step               | What it does                                                                                                                                                            |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Extract frames** | Pulls every frame from the video as a JPEG using ffmpeg                                                                                                                 |
+| **Pre-process**    | Sharpens and normalises each frame; upscales if the source is narrower than 1280 px                                                                                     |
+| **Detect plates**  | Sends each frame to OpenALPR (running in Docker) and collects bounding-box polygons and plate text                                                                      |
+| **Character scan** | Runs tesseract.js on an expanded region around each ANPR detection to find characters that OpenALPR clipped from the polygon edges; widens the polygon to cover them    |
+| **Build tracks**   | Links detections across frames using IOU matching; interpolates positions across short gaps                                                                             |
+| **Extend tracks**  | Extends each track beyond the ANPR detection window using SAD template matching (backward and forward), then velocity extrapolation for `--extend-detection` ms further |
+| **Obscure frames** | Fills each detection polygon with a feathered colour sampled from the plate background                                                                                  |
+| **Compose video**  | Re-encodes the obscured frames into an output video with original audio                                                                                                 |
+| **JSON output**    | Writes a structured result document (including full tracking history) to stdout                                                                                         |
 
 [^sad]: **Sum of Absolute Differences.** This is a comparison between a block of pixels in the 'current' frame and a candidate block in a candidate frame. Using multiple candidate positions, the lowest SAD is the best match for the original block - so likely indicating the motion of the block.
 
@@ -82,54 +94,70 @@ The `number-jam-alpr` Docker image is built automatically on first run. If you u
 > [!TIP]
 > Use `npx number-jam` to run without a global install. To install globally instead: `npm install -g number-jam`.
 
-### Invocations
+### Detect and obscure plates
 
 ```bash
-# Basic detection — print JSON to stdout
-npx number-jam --input path/to/video.mp4
-
-# Filter by region (comma-separated ISO codes)
-npx number-jam --input video.mp4 --regions gb,de,fr
-
-# Detect and obscure plates in an output video
-npx number-jam --input video.mp4 --obscured-output output.mp4
-
-# Extend obscured plates 5 seconds before/after each track
-npx number-jam --input video.mp4 --obscured-output output.mp4 -x 5000
-
-# Add padding and a 500 ms fade around each obscuring polygon
-npx number-jam --input video.mp4 --obscured-output output.mp4 --padding-width 10px --padding-height 5% --fade-duration 500
-
-# Include full frame-by-frame tracking history in JSON output
-npx number-jam --input video.mp4 --verbose
-
-# Pipe JSON output to a file
-npx number-jam --input video.mp4 > results.json
+# Simplest use case: detect and obscure number plates in a video
+npx number-jam detect --input source.mp4 | npx number-jam obscure --input source.mp4 --output output.mp4 > plates.json
 ```
 
-### Options
+```bash
+# Using an intermediary file: Save the detection output to a file, then obscure plates
+npx number-jam detect --input video.mp4 -r gb > plates.json
+npx number-jam obscure --input video.mp4 -t plates.json --output output.mp4
+```
 
-| Flag                             | Description                                                                         |
-| -------------------------------- | ----------------------------------------------------------------------------------- |
-| `-i`, `--input <path>`           | Path to the input video file **(required)**                                         |
-| `-o`, `--obscured-output <path>` | Obscure detected plates and write the output video to this path                     |
-| `-r`, `--regions <codes>`        | Comma-separated region codes (e.g. `gb,de,us`). Defaults to all.                    |
-| `-v`, `--verbose`                | Include full frame-by-frame polygon history in JSON output                          |
-| `-c`, `--confidence <n>`         | Drop detections below this OCR confidence threshold (0–100)                         |
-| `-x`, `--extend-detection <ms>`  | Extend obscuring this many milliseconds before/after each track (default: 2000)     |
-| `-m`, `--min-fraction <n>`       | Minimum visible plate fraction (0–1) required to obscure a frame (default: 0.01)    |
-| `-f`, `--fade-duration <ms>`     | Fade obscuring polygons in/out over this many ms at each appearance (default: 1000) |
-| `--padding-width <amount>`       | Expand each polygon horizontally on each side — e.g. `10`, `10px`, `5%`             |
-| `--padding-height <amount>`      | Expand each polygon vertically on each side — e.g. `10`, `10px`, `5%`               |
-| `--rebuild-docker-image`         | Force a rebuild of the `number-jam-alpr` Docker image even if it already exists     |
-| `-h`, `--help`                   | Show all options and list all accepted region codes                                 |
+### Detect plates
+
+```bash
+# Detect plates (includes full tracking history)
+npx number-jam detect --input path/to/video.mp4 > plates.json
+
+# Filter detected plates by region (comma-separated ISO codes)
+# NB. This affects listed plates, but all plates are tracked for obscuring
+npx number-jam detect --input video.mp4 --regions gb,de > english-and-german-plates.json
+
+# Extend tracked plates 5 seconds before/after the detection window
+npx number-jam detect --input video.mp4 --extend-detection 5000 > extended-detection-plates.json
+```
+
+### Obscure plates
+
+```bash
+# Add some padding, and shorten the fade from 1s to 0.5s fade when obscuring
+npx number-jam obscure --input video.mp4 --tracking plates.json --output output.mp4 --padding-width 10px --padding-height 5% --fade-duration 500 > padded-plates.json
+```
+
+### Options — `detect`
+
+| Flag                            | Description                                                                                |
+| ------------------------------- | ------------------------------------------------------------------------------------------ |
+| `-i`, `--input <path>`          | Path to the input video file **(required)**                                                |
+| `-r`, `--regions <codes>`       | Comma-separated region codes (e.g. `gb,de,us`). Defaults to all.                           |
+| `-c`, `--confidence <n>`        | Drop detections below this OCR confidence threshold (`0`–`100`)                            |
+| `-x`, `--extend-detection <ms>` | Velocity-extrapolate plate positions this many ms beyond visual tracking (default: `2000`) |
+| `-m`, `--min-fraction <n>`      | Minimum visible plate fraction (0–1) required to include a frame (default: `0.01`)         |
+| `--rebuild-docker-image`        | Force a rebuild of the `number-jam-alpr` Docker image even if it already exists            |
+| `-h`, `--help`                  | Show all options and list all accepted region codes                                        |
+
+### Options — `obscure`
+
+| Flag                         | Description                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------- |
+| `-i`, `--input <path>`       | Path to the input video file **(required)**                                           |
+| `-o`, `--output <path>`      | Write the obscured video to this path **(required)**                                  |
+| `-t`, `--tracking <path>`    | Path to a detect JSON document (reads from stdin when omitted)                        |
+| `-f`, `--fade-duration <ms>` | Fade obscuring polygons in/out over this many ms at each appearance (default: `1000`) |
+| `--padding-width <amount>`   | Expand each polygon horizontally on each side — e.g. `10`, `10px`, `5%`               |
+| `--padding-height <amount>`  | Expand each polygon vertically on each side — e.g. `10`, `10px`, `5%`                 |
+| `-h`, `--help`               | Show all options                                                                      |
 
 ### Region codes
 
 Region codes follow ISO 3166-1 alpha-2 (e.g. `gb`, `de`, `fr`, `us`, `au`). Run the following to see every accepted code:
 
 ```bash
-number-jam --help
+number-jam detect --help
 ```
 
 ## Output format
@@ -141,15 +169,13 @@ The tool prints a single JSON document to stdout:
   "request": {
     "path": "video.mp4", // input path as given
     "regions": ["gb", "de"], // region filter ("*" = all)
-    "obscure": false,
-    "verbose": false,
   },
   "summary": [
     {
       "plate": "AB12CDE",
       "region": "gb",
-      "trackedFrom": 1040, // ms from video start
-      "trackedUntil": 8320, // ms from video start
+      "trackedFrom": 640, // ms from video start (includes visual tracking extension)
+      "trackedUntil": 9320, // ms from video start
     },
     {
       "plate": "", // unreadable partial plate
@@ -159,12 +185,12 @@ The tool prints a single JSON document to stdout:
     },
   ],
   "tracking": [
-    // populated only when --verbose is set
+    // always present — contains all frames: ANPR detections, visual tracking, and velocity extrapolation
     {
       "plate": "AB12CDE",
       "history": [
         {
-          "timestamp": 1040, // ms from video start
+          "timestamp": 640, // ms from video start
           "polygon": [
             [100, 200],
             [200, 200],
@@ -172,14 +198,14 @@ The tool prints a single JSON document to stdout:
             [100, 250],
           ],
         },
-        // ... one entry per frame the plate was visible
-        // gaps between actual detections are interpolated
+        // ... one entry per tracked frame (ANPR detection, visual tracking, or extrapolation)
+        // frames between these entries are interpolated during the obscure step
       ],
     },
   ],
   "videoDuration": 11000, // ms, rounded to nearest integer
   "processingDuration": 4521, // wall-clock ms
-  "output": "/abs/path/out.mp4", // null when --obscure was not set
+  "output": "/abs/path/out.mp4", // null for detect output; resolved path for obscure output
 }
 ```
 
@@ -194,21 +220,27 @@ Progress information (frame count, detection counts, etc.) is written to **stder
 ```
 number-jam/
 ├── src/
-│   ├── cli/         Phase functions, character scan, progress bars
-│   ├── detection/   DetectionEngine interface, frame iterator, docker-alpr backend
-│   ├── obscuring/   Feathered colour-fill obscurer
-│   ├── output/      JSON output document builder
-│   ├── regions/     Plate-format regex database and region inference
-│   ├── tracking/    IOU tracker, motion helpers, SAD visual tracker
-│   ├── video/       Frame extractor and video composer (ffmpeg)
-│   ├── cli.ts       Entry point — orchestrates the full pipeline
-│   └── types.ts     Shared TypeScript interfaces
-├── docker/          Dockerfile and Flask HTTP wrapper for OpenALPR
-├── scripts/         Install scripts, fixture downloader, plate-format generator
+│   ├── cli/
+│   │   ├── detect.ts          detect sub-command handler
+│   │   ├── obscure.ts         obscure sub-command handler
+│   │   ├── shared.ts          Utilities shared by both sub-commands (parseRegions etc.)
+│   │   ├── phases.ts          Named phase functions (extraction, detection, tracking, obscuring)
+│   │   ├── character-scan.ts  Tesseract polygon-widening scan
+│   │   └── progress.ts        Progress bar helpers
+│   ├── detection/             DetectionEngine interface, frame iterator, docker-alpr backend
+│   ├── obscuring/             Feathered colour-fill obscurer
+│   ├── output/                JSON output document builder
+│   ├── regions/               Plate-format regex database and region inference
+│   ├── tracking/              IOU tracker, motion helpers, SAD visual tracker
+│   ├── video/                 Frame extractor and video composer (ffmpeg)
+│   ├── cli.ts                 Entry point — registers detect and obscure sub-commands
+│   └── types.ts               Shared TypeScript interfaces
+├── docker/                    Dockerfile and Flask HTTP wrapper for OpenALPR
+├── scripts/                   Install scripts, fixture downloader, plate-format generator
 └── tests/
-    ├── fixtures/    Static test fixtures (images, video clip, attribution)
-    │   └── videos/  User-supplied plate-coverage clips (git-ignored)
-    └── integration/ Integration tests and TestVideoMetadata type
+    ├── fixtures/              Static test fixtures (images, video clip, attribution)
+    │   └── videos/            User-supplied plate-coverage clips (git-ignored)
+    └── integration/           Integration tests and TestVideoMetadata type
 ```
 
 ### Running from source
@@ -216,8 +248,8 @@ number-jam/
 Clone the repo, then use the provided launcher scripts to build and run without a global install:
 
 ```bash
-./run-mac.sh --input video.mp4    # macOS
-./run-linux.sh --input video.mp4  # Linux
+./run-mac.sh detect -i video.mp4    # macOS
+./run-linux.sh detect -i video.mp4  # Linux
 ```
 
 The `number-jam-alpr` Docker image is built automatically on first run. You can also build it manually at any time:
@@ -339,4 +371,4 @@ This triggers the [Release workflow](.github/workflows/release.yml), which build
 
 1. Check the [Release workflow run](https://github.com/instantiator/number-jam/actions/workflows/release.yml) completed without errors
 2. Confirm the new version appears on the [npm package page](https://www.npmjs.com/package/number-jam)
-3. Smoke-test the published package: `npx number-jam@latest --help`
+3. Smoke-test the published package: `npx number-jam@latest detect --help`

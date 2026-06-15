@@ -12,15 +12,13 @@ export function buildOutputDoc(
   output: string | null,
 ): OutputDoc {
   const summary = buildSummary(tracks);
-  const tracking = request.verbose
-    ? tracks.map((t) => ({
-        plate: t.plate,
-        history: t.history.map((h) => ({
-          timestamp: Math.round(h.timestamp * 1000),
-          polygon: h.polygon,
-        })),
-      }))
-    : [];
+  const tracking = tracks.map((t) => ({
+    plate: t.plate,
+    history: t.history.map((h) => ({
+      timestamp: Math.round(h.timestamp * 1000),
+      polygon: h.polygon,
+    })),
+  }));
 
   return {
     request,
