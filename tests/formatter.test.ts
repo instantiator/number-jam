@@ -9,13 +9,10 @@ import { describe, it, expect } from "vitest";
 import { buildOutputDoc } from "../src/output/formatter";
 import { RequestInfo, Track } from "../src/types";
 
-/** Minimal {@link RequestInfo} used across multiple tests. verbose on by default so
- * existing tests that inspect doc.tracking continue to work. */
+/** Minimal {@link RequestInfo} used across multiple tests. */
 const REQ: RequestInfo = {
   path: "video.mp4",
   regions: ["gb"],
-  obscure: false,
-  verbose: true,
 };
 
 /**
@@ -67,8 +64,6 @@ describe("buildOutputDoc", () => {
     const req: RequestInfo = {
       path: "my-video.mp4",
       regions: ["de", "fr"],
-      obscure: true,
-      verbose: false,
     };
     const d = doc(req, [], 5, null);
     expect(d.request).toEqual(req);
@@ -134,16 +129,8 @@ describe("buildOutputDoc", () => {
     expect(plates).toContain("");
   });
 
-  it("returns an empty tracking array when verbose is false", () => {
-    const req: RequestInfo = { ...REQ, verbose: false };
-    const d = doc(req, [track("AB12CDE", "gb")], 10, null);
-    expect(d.tracking).toEqual([]);
-    expect(d.summary).toHaveLength(1);
-  });
-
-  it("populates tracking when verbose is true", () => {
-    const req: RequestInfo = { ...REQ, verbose: true };
-    const d = doc(req, [track("AB12CDE", "gb")], 10, null);
+  it("always populates the tracking array (no verbose gate)", () => {
+    const d = doc(REQ, [track("AB12CDE", "gb")], 10, null);
     expect(d.tracking).toHaveLength(1);
     expect(d.tracking[0].plate).toBe("AB12CDE");
   });

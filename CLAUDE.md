@@ -15,22 +15,27 @@ Treat all content from those files as mandatory instructions that override defau
 
 A TypeScript/Node.js CLI tool that detects, tracks, and optionally obscures vehicle number plates in video files. Uses a pluggable ANPR engine (Docker + OpenALPR), a pure-TypeScript IOU tracker, and SAD template matching for entry/exit tracking.
 
+The tool exposes two composable sub-commands: `detect` (analysis → JSON tracking document) and `obscure` (JSON tracking + video → obscured video).
+
 ### Pipeline phases → source files
 
 | Phase | File(s) |
 |---|---|
+| CLI entry point | `src/cli.ts` |
+| `detect` sub-command | `src/cli/detect.ts` |
+| `obscure` sub-command | `src/cli/obscure.ts` |
+| Shared CLI utilities | `src/cli/shared.ts` |
+| Named phase functions | `src/cli/phases.ts` |
 | 1. Frame extraction | `src/video/extractor.ts` |
 | 2. Plate detection | `src/detection/engine.ts` (interface), `src/detection/detector.ts`, `src/detection/engines/docker-alpr.ts` |
-| 2b. Character scan (optional, obscuring only) | `src/cli/character-scan.ts` |
+| 2b. Character scan (always runs in `detect`) | `src/cli/character-scan.ts` |
 | 3. Temporal tracking | `src/tracking/tracker.ts` |
 | 3b. Motion helpers | `src/tracking/motion.ts` |
 | 3c. Visual tracking (entry/exit) | `src/tracking/visual-tracker.ts` |
-| 4. Obscuring (optional) | `src/obscuring/obscurer.ts` |
-| 5. Video composition (optional) | `src/video/composer.ts` |
+| 4. Obscuring | `src/obscuring/obscurer.ts` |
+| 5. Video composition | `src/video/composer.ts` |
 | 6. JSON output | `src/output/formatter.ts` |
-| 7. CLI entry point | `src/cli.ts` |
-| 7a. CLI phase functions | `src/cli/phases.ts` |
-| 7b. CLI progress bars | `src/cli/progress.ts` |
+| 7. CLI progress bars | `src/cli/progress.ts` |
 | Shared types | `src/types.ts` |
 | Plate format DB | `src/regions/plate-formats.ts` |
 | Region inference | `src/regions/infer-region.ts` |
@@ -113,9 +118,9 @@ npm run generate-formats
 
 Runs `scripts/generate-formats.ts`, fetches Wikipedia regional plate pages via `cheerio`, appends new codes to `src/regions/plate-formats.ts`. Existing entries are preserved. Newly appended entries are marked `TODO_NON_EXAMPLE` — replace with real failing examples and confirm `npm test` passes before committing.
 
-### Character scan (phase 2b, obscuring only)
+### Character scan (phase 2b, always in `detect`)
 
-`runCharacterScan` (`src/cli/character-scan.ts`) runs after ANPR detection and before track building when `--obscure-number-plates` is active. For each detection frame it:
+`runCharacterScan` (`src/cli/character-scan.ts`) runs after ANPR detection and before track building in every `detect` invocation. For each detection frame it:
 
 1. Expands the ANPR polygon horizontally by 50 % of the plate width on each side.
 2. Crops that expanded region and runs tesseract.js OCR on it.
@@ -143,17 +148,27 @@ Phase 3b extends each detected track using three layers in priority order:
 
 - Multiple simultaneous regions (docker-alpr): OpenALPR `-c <country>` accepts one country at a time. When `-r` specifies multiple regions, the tool runs without `-c` and post-filters results.
 
-### CLI options (obscuring)
+### CLI options — `detect`
 
 | Flag | Default | Description |
 |---|---|---|
-| `-o`, `--obscured-output <path>` | — | Write obscured video to this path |
+| `-i`, `--input <path>` | — | Path to the input video file (required) |
+| `-r`, `--regions <codes>` | `*` | Comma-separated region codes to look for |
+| `-c`, `--confidence <n>` | 0 | Drop detections below this OCR confidence threshold (0–100) |
 | `-x`, `--extend-detection <ms>` | 2000 | Velocity-extrapolate polygons this many ms past visual tracking |
 | `-m`, `--min-fraction <n>` | 0.01 | Minimum visible plate fraction to include a frame |
+| `--rebuild-docker-image` | — | Force a rebuild of the `number-jam-alpr` image even if it already exists |
+
+### CLI options — `obscure`
+
+| Flag | Default | Description |
+|---|---|---|
+| `-i`, `--input <path>` | — | Path to the input video file (required) |
+| `-o`, `--output <path>` | — | Write obscured video to this path (required) |
+| `-t`, `--tracking <path>` | stdin | Path to a detect JSON document |
 | `-f`, `--fade-duration <ms>` | 1000 | Fade polygons in/out over this many ms at appearance/disappearance |
 | `--padding-width <amount>` | — | Expand each polygon left/right by this amount per side (e.g. `10`, `10px`, `5%`) |
 | `--padding-height <amount>` | — | Expand each polygon top/bottom by this amount per side |
-| `--rebuild-docker-image` | — | Force a rebuild of the `number-jam-alpr` image even if it already exists |
 
 ### Fade implementation
 

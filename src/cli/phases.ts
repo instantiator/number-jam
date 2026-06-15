@@ -260,6 +260,18 @@ export function runTrackBuilding(frameResults: FrameResult[], fps: number): Trac
   return tracks;
 }
 
+/** Return type for {@link runTrackCoverage}. */
+export interface TrackCoverageResult {
+  /** Per-frame polygon map consumed by the obscuring phase. Polygons are rolling-window merged. */
+  trackPolygons: Map<number, Point[][]>;
+  /**
+   * Per-plate tracks with history extended to include visual tracking and velocity extrapolation
+   * frames alongside the original ANPR detections. Positions are pre-merge (faithful to each
+   * plate's individual tracking result). Used to populate the JSON output intermediary.
+   */
+  extendedTracks: Track[];
+}
+
 /**
  * Phase 3b: extend each track with unconstrained SAD visual tracking and apply
  * velocity extrapolation at the outermost edges. Any intra-track frame gaps are
@@ -286,7 +298,7 @@ export async function runTrackCoverage(
   frameH: number,
   fps = 30,
   minVisibleFraction = MIN_VISIBLE_FRACTION,
-): Promise<Map<number, Point[][]>> {
+): Promise<TrackCoverageResult> {
   const trackPolygons = new Map<number, Point[][]>();
 
   // Seed from history entries (actual + interpolated detection positions).
@@ -299,11 +311,18 @@ export async function runTrackCoverage(
     }
   }
 
+  // frameIndex → timestamp lookup for building extended track histories.
+  const frameTimestamp = new Map<number, number>(frames.map((f) => [f.frameIndex, f.timestamp]));
+
   const bar = createProgressBar("Extending tracks", tracks.length);
+
+  // Per-plate extended history (pre-merge), populated inside the loop.
+  const extendedTracks: Track[] = [];
 
   await Promise.all(
     tracks.map(async (track) => {
       if (track.history.length === 0) {
+        extendedTracks.push({ ...track });
         bar.increment();
         return;
       }
@@ -382,7 +401,7 @@ export async function runTrackCoverage(
         }
       }
 
-      // Merge all coverage; history entries already present take priority.
+      // Merge all coverage into trackPolygons; history entries already present take priority.
       for (const { frameIndex, polygon } of [
         ...backCoverage,
         ...fwdCoverage,
@@ -393,6 +412,34 @@ export async function runTrackCoverage(
         if (polygon.length < 3 || trackPolygons.has(frameIndex)) continue;
         trackPolygons.set(frameIndex, [polygon]);
       }
+
+      // Build per-plate extended history (pre-merge). history entries take priority
+      // over coverage entries for the same frame (same dedup logic as trackPolygons).
+      const seenFrames = new Set<number>(track.history.map((h) => h.frameIndex));
+      const extraEntries: Array<{ frameIndex: number; polygon: Point[] }> = [];
+      for (const entry of [
+        ...backCoverage,
+        ...fwdCoverage,
+        ...gapCoverage,
+        ...backExt,
+        ...fwdExt,
+      ]) {
+        if (entry.polygon.length >= 3 && !seenFrames.has(entry.frameIndex)) {
+          seenFrames.add(entry.frameIndex);
+          extraEntries.push(entry);
+        }
+      }
+
+      const extendedHistory = [
+        ...track.history,
+        ...extraEntries.map(({ frameIndex, polygon }) => ({
+          frameIndex,
+          timestamp: frameTimestamp.get(frameIndex) ?? frameIndex / fps,
+          polygon,
+        })),
+      ].sort((a, b) => a.frameIndex - b.frameIndex);
+
+      extendedTracks.push({ plate: track.plate, region: track.region, history: extendedHistory });
 
       bar.increment();
     }),
@@ -405,7 +452,7 @@ export async function runTrackCoverage(
 
   bar.stop();
   process.stderr.write(`${trackPolygons.size} frame(s) scheduled for obscuring\n`);
-  return trackPolygons;
+  return { trackPolygons, extendedTracks };
 }
 
 /**
