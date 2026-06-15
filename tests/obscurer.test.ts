@@ -173,6 +173,46 @@ describe("snapPolygonToEdges", () => {
     const maxY = Math.max(...snapped.map(([, y]) => y));
     expect(maxY).toBe(H);
   });
+
+  it("snaps leftward when the left edge is within EDGE_SNAP_MARGIN of x=0", () => {
+    const polygon: [number, number][] = [
+      [8,  200],
+      [200, 200],
+      [200, 260],
+      [8,  260],
+    ];
+    const snapped = snapPolygonToEdges(polygon, W, H);
+    const minX = Math.min(...snapped.map(([x]) => x));
+    expect(minX).toBe(0);
+    // Height must be unchanged.
+    expect(snapped[0][1]).toBe(200);
+    expect(snapped[2][1]).toBe(260);
+  });
+
+  it("snaps rightward when the right edge is within EDGE_SNAP_MARGIN of frameW", () => {
+    const polygon: [number, number][] = [
+      [1700, 200],
+      [1915, 200],
+      [1915, 260],
+      [1700, 260],
+    ];
+    const snapped = snapPolygonToEdges(polygon, W, H);
+    const maxX = Math.max(...snapped.map(([x]) => x));
+    expect(maxX).toBe(W);
+  });
+
+  it("snaps both axes independently when the polygon is near a corner", () => {
+    // Top-left corner: minX=10 (within margin) and minY=5 (within margin).
+    const polygon: [number, number][] = [
+      [10, 5],
+      [200, 5],
+      [200, 60],
+      [10,  60],
+    ];
+    const snapped = snapPolygonToEdges(polygon, W, H);
+    expect(Math.min(...snapped.map(([x]) => x))).toBe(0);
+    expect(Math.min(...snapped.map(([, y]) => y))).toBe(0);
+  });
 });
 
 // expandPolygon

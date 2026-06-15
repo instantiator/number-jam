@@ -121,24 +121,28 @@ const EDGE_BLUR_SIGMA = 3;
 const EDGE_SNAP_MARGIN = 20;
 
 /**
- * Shift the polygon vertically / horizontally so that any edge that is within
- * EDGE_SNAP_MARGIN px of a frame boundary is moved flush with that boundary.
- * Handles top and bottom edges; left and right follow the same pattern if
- * needed in future. Exported for unit testing.
+ * Shift the polygon so that any edge within EDGE_SNAP_MARGIN px of a frame
+ * boundary is moved flush with that boundary. Handles all four edges.
+ * Exported for unit testing.
  */
 export function snapPolygonToEdges(polygon: Point[], frameW: number, frameH: number): Point[] {
+  const xs = polygon.map(([x]) => x);
   const ys = polygon.map(([, y]) => y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
   const minY = Math.min(...ys);
   const maxY = Math.max(...ys);
 
-  // Snap top: shift up when the top edge is inside the frame but within margin.
+  let dx = 0;
+  if (minX > 0 && minX < EDGE_SNAP_MARGIN) dx = -minX;
+  else if (maxX < frameW && maxX > frameW - EDGE_SNAP_MARGIN) dx = frameW - maxX;
+
   let dy = 0;
   if (minY > 0 && minY < EDGE_SNAP_MARGIN) dy = -minY;
-  // Snap bottom: shift down when the bottom edge is within margin of frameH.
   else if (maxY < frameH && maxY > frameH - EDGE_SNAP_MARGIN) dy = frameH - maxY;
 
-  if (dy === 0) return polygon;
-  return polygon.map(([x, y]) => [x, y + dy] as Point);
+  if (dx === 0 && dy === 0) return polygon;
+  return polygon.map(([x, y]) => [x + dx, y + dy] as Point);
 }
 
 /**
