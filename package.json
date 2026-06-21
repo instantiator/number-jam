@@ -38,7 +38,7 @@
   "devDependencies": {
     "@types/cli-progress": "^3.11.6",
     "@types/fluent-ffmpeg": "^2.1.28",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^4.1.9",
     "tesseract.js": "^7.0.0",
     "tsx": "^4.19.0",
