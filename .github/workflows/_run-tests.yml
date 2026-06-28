@@ -46,7 +46,7 @@ jobs:
 
       # Cache downloaded fixture files. The key is tied to the download
       # script so the cache is invalidated when fixtures change.
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: tests/fixtures
           key: fixtures-${{ hashFiles('scripts/download-fixtures.ts') }}
